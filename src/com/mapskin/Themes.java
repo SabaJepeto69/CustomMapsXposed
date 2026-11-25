@@ -73,8 +73,9 @@ public final class Themes {
         add(a, "landscape.natural.terrain", "geometry", "color", c[2]);
         add(a, "landscape.man_made", "geometry", "color", c[7]);
         if (BUILDING_EDGE[t] != null) {
-            // Google's 3D buildings (tilted view, high zoom) take their fill and edge colours from these.
-            add(a, "landscape.man_made", "geometry.fill", "color", c[8], "lightness", -35);
+            // Google styles buildings and all built-up land as one feature (landscape.man_made), so the fill has to
+            // stay dark or whole cities turn red; the neon-red edges are what make the (3D) buildings pop.
+            add(a, "landscape.man_made", "geometry.fill", "color", "#3a0c16");
             add(a, "landscape.man_made", "geometry.stroke", "color", BUILDING_EDGE[t], "weight", 1.5);
         }
         add(a, "poi", "geometry", "color", c[0]);
