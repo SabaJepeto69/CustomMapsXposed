@@ -165,9 +165,86 @@ public class Hook implements IXposedHookLoadPackage {
             tiles.writeOverlayOptions(d);
             engine.transact(TX_ADD_TILE_OVERLAY, d, r, 0);
             r.readException();
+            android.os.IBinder overlay = r.readStrongBinder();
             log("3D buildings overlay added (zoom " + BuildingTiles.MIN_ZOOM + "-" + BuildingTiles.MAX_ZOOM
-                    + ", overlay=" + (r.readStrongBinder() != null) + ")");
+                    + ", overlay=" + (overlay != null) + ")");
+            if (overlay != null) watchCamera(engine, tiles, overlay);
         } catch (Throwable t) { log(t); }
+        finally { d.recycle(); r.recycle(); }
+    }
+
+    // ---- Keep the buildings' lean in step with the camera: poll bearing/tilt, redraw the overlay when they settle ----
+    static final String TILE_OVERLAY = "com.google.android.gms.maps.model.internal.ITileOverlayDelegate";
+    static final int TX_CLEAR_TILE_CACHE = 2;    // ITileOverlayDelegate: 1 remove, 2 clearTileCache
+    static final long CAMERA_POLL_MS = 200;
+    static final float BEARING_STEP = 8f, TILT_STEP = 10f;
+
+    static void watchCamera(final android.os.Binder engine, final BuildingTiles tiles, final android.os.IBinder overlay) {
+        final android.os.Handler main = new android.os.Handler(Looper.getMainLooper());
+        main.post(new Runnable() {
+            float lastB = Float.NaN, lastT = Float.NaN;
+            int fails;
+            public void run() {
+                float[] cam = cameraBearingTilt(engine);
+                if (cam == null) { if (++fails > 25) { log("3D buildings: camera watch stopped"); return; } }
+                else {
+                    fails = 0;
+                    float b = cam[0], t = cam[1];
+                    // only redraw once the gesture pauses (two polls agree), so tiles aren't re-rendered mid-swipe
+                    boolean settled = !Float.isNaN(lastB) && angleDiff(b, lastB) < 1.5f && Math.abs(t - lastT) < 1.5f;
+                    if (settled && (angleDiff(b, tiles.bearing) >= BEARING_STEP || Math.abs(t - tiles.tilt) >= TILT_STEP)) {
+                        tiles.bearing = b;
+                        tiles.tilt = t;
+                        clearTileCache(overlay);
+                    }
+                    lastB = b; lastT = t;
+                }
+                main.postDelayed(this, CAMERA_POLL_MS);
+            }
+        });
+    }
+
+    static float angleDiff(float a, float b) {
+        float d = Math.abs(a - b) % 360f;
+        return d > 180f ? 360f - d : d;
+    }
+
+    static void clearTileCache(android.os.IBinder overlay) {
+        android.os.Parcel d = android.os.Parcel.obtain(), r = android.os.Parcel.obtain();
+        try {
+            d.writeInterfaceToken(TILE_OVERLAY);
+            overlay.transact(TX_CLEAR_TILE_CACHE, d, r, 0);
+            r.readException();
+        } catch (Throwable t) { log(t); }
+        finally { d.recycle(); r.recycle(); }
+    }
+
+    /**
+     * {bearing, tilt} from map transaction 1 (getCameraPosition), read straight from the CameraPosition SafeParcel
+     * (2 target, 3 zoom, 4 tilt, 5 bearing) so it doesn't go through the hooked constructor. null on failure.
+     */
+    static float[] cameraBearingTilt(android.os.Binder engine) {
+        android.os.Parcel d = android.os.Parcel.obtain(), r = android.os.Parcel.obtain();
+        try {
+            d.writeInterfaceToken(MAP_DELEGATE);
+            engine.transact(1, d, r, 0);
+            r.readException();
+            if (r.readInt() == 0) return null;
+            int h = r.readInt();
+            if ((h & 0xFFFF) != 20293) return null;
+            int size = (h >>> 16) == 0xFFFF ? r.readInt() : h >>> 16;
+            int stop = r.dataPosition() + size;
+            float[] out = {0f, 0f};
+            while (r.dataPosition() < stop) {
+                int fh = r.readInt(), id = fh & 0xFFFF;
+                int fs = (fh >>> 16) == 0xFFFF ? r.readInt() : fh >>> 16;
+                int next = r.dataPosition() + fs;
+                if (id == 5) out[0] = r.readFloat();
+                else if (id == 4) out[1] = r.readFloat();
+                r.setDataPosition(next);
+            }
+            return out;
+        } catch (Throwable t) { return null; }
         finally { d.recycle(); r.recycle(); }
     }
 

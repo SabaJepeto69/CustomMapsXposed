@@ -170,8 +170,13 @@ final class Mvt {
             BuildingTiles.Building bd = new BuildingTiles.Building();
             bd.height = height;
             bd.minHeight = minHeight;
-            bd.maxY = -Float.MAX_VALUE;
-            for (int i = 1; i < n; i += 2) if (r[i] > bd.maxY) bd.maxY = r[i];
+            bd.orient = area >= 0 ? 1 : -1;
+            bd.minX = bd.minY = Float.MAX_VALUE;
+            bd.maxX = bd.maxY = -Float.MAX_VALUE;
+            for (int i = 0; i < n; i += 2) {
+                bd.minX = Math.min(bd.minX, r[i]); bd.maxX = Math.max(bd.maxX, r[i]);
+                bd.minY = Math.min(bd.minY, r[i + 1]); bd.maxY = Math.max(bd.maxY, r[i + 1]);
+            }
             bd.rings.add(r);
             out.add(bd);
             cur[0] = bd;

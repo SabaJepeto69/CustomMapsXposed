@@ -46,7 +46,7 @@ public final class BuildingTiles extends Binder {
     }
 
     final Context ctx;
-    final int roof, wallLight, wallDark, edge;
+    final int roof, edge;
     String tileUrl;                           // e.g. https://tiles.openfreemap.org/planet/<version>/{z}/{x}/{y}.pbf
     final Map<String, byte[]> mem = Collections.synchronizedMap(new LinkedHashMap<String, byte[]>(64, 0.75f, true) {
         protected boolean removeEldestEntry(Map.Entry<String, byte[]> e) { return size() > 48; }
@@ -56,8 +56,6 @@ public final class BuildingTiles extends Binder {
         this.ctx = ctx;
         this.roof = roof;
         this.edge = edge;
-        this.wallLight = shade(roof, 0.78f);   // walls must stand out from the dark ground for the 3D to read
-        this.wallDark = shade(roof, 0.55f);
     }
 
     static int shade(int c, float f) {
@@ -115,24 +113,52 @@ public final class BuildingTiles extends Binder {
 
     static final class Building {
         final List<float[]> rings = new ArrayList<float[]>();   // x0,y0,x1,y1,... in tile pixels; first ring = outer
-        float height, minHeight, maxY;
+        float height, minHeight;
+        float minX, minY, maxX, maxY;                            // outer ring bounds
+        int orient = 1;                                          // +1 if the outer ring has positive area (MVT exterior)
+        float depth;                                             // sort key for the current view
+    }
+
+    // ---------------- camera: buildings lean "up the screen", so they follow the map's rotation and tilt ----------------
+    volatile float bearing;   // degrees clockwise from north, as last applied
+    volatile float tilt = 55; // degrees
+
+    /** How far roofs lean compared with the 55 degree default: flatter view = shorter lean (never zero, it's a game map). */
+    static float tiltScale(float tilt) {
+        return (float) (0.5 + 0.5 * Math.sin(Math.toRadians(tilt)) / Math.sin(Math.toRadians(55)));
     }
 
     byte[] render(int x, int y, int z) throws Exception {
         if (z < MIN_ZOOM || z > MAX_ZOOM) return null;
-        List<Building> list = new ArrayList<Building>();
-        load(list, x, y, z, 0);
+        double th = Math.toRadians(bearing);
+        // In tile pixels (x east, y south): "up the screen" = (sin b, -cos b); towards the viewer = the opposite.
+        final float ux = (float) Math.sin(th), uy = (float) -Math.cos(th);
+        final float rx = -uy, ry = ux;                       // screen-right, for lighting
         int n = 1 << z;
-        if (y + 1 < n) load(list, x, y + 1, z, SIZE);       // roofs of buildings just south of this tile lean into it
+
+        List<Building> list = new ArrayList<Building>();
+        load(list, x, y, z, 0, 0);
+        // roofs of buildings on the "down-screen" side lean into this tile: load those neighbours too
+        int sx = ux > 0.05f ? -1 : ux < -0.05f ? 1 : 0, sy = uy > 0.05f ? -1 : uy < -0.05f ? 1 : 0;
+        if (sx != 0) load(list, (x + sx + n) % n, y, z, sx * SIZE, 0);
+        if (sy != 0 && y + sy >= 0 && y + sy < n) load(list, x, y + sy, z, 0, sy * SIZE);
+        if (sx != 0 && sy != 0 && y + sy >= 0 && y + sy < n) load(list, (x + sx + n) % n, y + sy, z, sx * SIZE, sy * SIZE);
         if (list.isEmpty()) return null;
 
         // ground metres per tile pixel, at this tile's latitude
         double lat = Math.atan(Math.sinh(Math.PI * (1 - 2.0 * (y + 0.5) / n)));
         double mpp = 40075016.686 * Math.cos(lat) / n / SIZE;
-        float pxPerMetre = (float) (exaggeration(z) / mpp);
+        float pxPerMetre = (float) (exaggeration(z) * tiltScale(tilt) / mpp);
 
-        Collections.sort(list, new Comparator<Building>() {   // back to front: northern (top) buildings first
-            public int compare(Building a, Building b) { return Float.compare(a.maxY, b.maxY); }
+        // back to front: furthest up the screen first
+        for (Building b : list) {
+            float[] o = b.rings.get(0);
+            float d = -Float.MAX_VALUE;
+            for (int i = 0; i < o.length; i += 2) d = Math.max(d, -(o[i] * ux + o[i + 1] * uy));
+            b.depth = d;
+        }
+        Collections.sort(list, new Comparator<Building>() {
+            public int compare(Building a, Building b) { return Float.compare(a.depth, b.depth); }
         });
 
         Bitmap bmp = Bitmap.createBitmap(SIZE, SIZE, Bitmap.Config.ARGB_8888);
@@ -148,23 +174,31 @@ public final class BuildingTiles extends Binder {
         for (Building b : list) {
             float lift = Math.min(Math.max(b.height, MIN_HEIGHT) * pxPerMetre, SIZE * 0.45f);
             float base = Math.min(b.minHeight * pxPerMetre, lift);
-            if (b.maxY - lift > SIZE || b.maxY < 0) continue;    // nothing of it lands on this tile
+            float lx = ux * lift, ly = uy * lift;
+            // skip if neither the footprint nor the raised roof touches this tile
+            if (Math.max(b.maxX, b.maxX + lx) < 0 || Math.min(b.minX, b.minX + lx) > SIZE
+                    || Math.max(b.maxY, b.maxY + ly) < 0 || Math.min(b.minY, b.minY + ly) > SIZE) continue;
+            float bx = ux * base, by = uy * base;
             float[] outer = b.rings.get(0);
             int pts = outer.length / 2;
-            // walls: one quad per edge, lit from the south (south-facing walls lighter)
+            // walls: only the ones facing the viewer, shaded by which way they face on screen
             for (int i = 0; i < pts; i++) {
                 float x1 = outer[i * 2], y1 = outer[i * 2 + 1];
                 float x2 = outer[((i + 1) % pts) * 2], y2 = outer[((i + 1) % pts) * 2 + 1];
+                float nx = (y2 - y1) * b.orient, ny = -(x2 - x1) * b.orient;      // outward normal
+                if (-(nx * ux + ny * uy) <= 0) continue;                       // faces away from the camera
+                float len = (float) Math.sqrt(nx * nx + ny * ny);
+                float side = len > 0 ? (nx * rx + ny * ry) / len : 0;          // -1 left-facing .. +1 right-facing
                 Path w = new Path();
-                w.moveTo(x1, y1 - base); w.lineTo(x2, y2 - base); w.lineTo(x2, y2 - lift); w.lineTo(x1, y1 - lift); w.close();
-                fill.setColor((x2 - x1) > 0 ? wallLight : wallDark);
+                w.moveTo(x1 + bx, y1 + by); w.lineTo(x2 + bx, y2 + by); w.lineTo(x2 + lx, y2 + ly); w.lineTo(x1 + lx, y1 + ly); w.close();
+                fill.setColor(shade(roof, 0.675f - 0.125f * side));            // lit from the left
                 c.drawPath(w, fill);
             }
             Path r = new Path();
             r.setFillType(Path.FillType.EVEN_ODD);
             for (float[] ring : b.rings) {
-                r.moveTo(ring[0], ring[1] - lift);
-                for (int i = 2; i < ring.length; i += 2) r.lineTo(ring[i], ring[i + 1] - lift);
+                r.moveTo(ring[0] + lx, ring[1] + ly);
+                for (int i = 2; i < ring.length; i += 2) r.lineTo(ring[i] + lx, ring[i + 1] + ly);
                 r.close();
             }
             fill.setColor(roof);
@@ -179,15 +213,15 @@ public final class BuildingTiles extends Binder {
         return o.toByteArray();
     }
 
-    /** Adds the buildings of map tile (x, y, z), shifted down by dy pixels, decoded from the matching vector tile. */
-    void load(List<Building> out, int x, int y, int z, float dy) throws Exception {
+    /** Adds the buildings of map tile (x, y, z), shifted by (dx, dy) pixels, decoded from the matching vector tile. */
+    void load(List<Building> out, int x, int y, int z, float dx, float dy) throws Exception {
         int dz = Math.min(z, DATA_ZOOM), shift = z - dz;
         int sx = x >> shift, sy = y >> shift;
         byte[] pbf = fetch(dz, sx, sy);
         if (pbf == null) return;
         int sub = 1 << shift;
         float ox = (x - sx * sub), oy = (y - sy * sub);       // which part of the source tile this map tile shows
-        Mvt.decodeBuildings(pbf, out, SIZE * sub, ox * SIZE, oy * SIZE - dy);
+        Mvt.decodeBuildings(pbf, out, SIZE * sub, ox * SIZE - dx, oy * SIZE - dy);
     }
 
     // ---------------- network + cache ----------------
