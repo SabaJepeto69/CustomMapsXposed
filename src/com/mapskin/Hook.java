@@ -73,6 +73,9 @@ public class Hook implements IXposedHookLoadPackage {
     static void hookMapboxTilt() {
         Class<?> co = find("com.mapbox.maps.CameraOptions");
         if (co == null) return;
+        // Only the opening camera moves (app start + first jump to your location) get tilted; after that the
+        // camera belongs to the user, so dragging, pinching and tilting work normally.
+        final long until = android.os.SystemClock.uptimeMillis() + 15000;
         int n = 0;
         for (final Constructor<?> k : co.getDeclaredConstructors()) {
             final java.util.List<Integer> dbl = new java.util.ArrayList<Integer>();
@@ -84,6 +87,7 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     if (p.args.length <= pitch || !(p.method instanceof Constructor)
                             || !java.util.Arrays.equals(((Constructor<?>) p.method).getParameterTypes(), k.getParameterTypes())) return;
+                    if (android.os.SystemClock.uptimeMillis() > until) return;
                     Object v = p.args[pitch];
                     if (v == null || ((Double) v) < TILT) p.args[pitch] = (double) TILT;
                 }
@@ -123,18 +127,61 @@ public class Hook implements IXposedHookLoadPackage {
         return null;
     }
 
-    /** CameraPosition(target, zoom, tilt, bearing): raise the tilt in every camera position the app or engine builds. */
+    static final float BUILDINGS_ZOOM = 17f;          // Google only draws 3D buildings from about street level
+    static final ThreadLocal<Boolean> tilting = new ThreadLocal<Boolean>();
+
+    /**
+     * CameraPosition(target, zoom, tilt, bearing). Only our own one-time camera move is changed (tilt + zoom in close
+     * enough for 3D buildings); positions built while the user drags are left alone so gestures keep working.
+     */
     static synchronized void hookCameraPosition(Class<?> cp) {
         if (!cameraClassesHooked.add(cp)) return;
         XposedBridge.hookAllConstructors(cp, new XC_MethodHook() {
             @Override protected void beforeHookedMethod(MethodHookParam p) {
+                if (!Boolean.TRUE.equals(tilting.get())) return;
                 Class<?>[] pt = ((Constructor<?>) p.method).getParameterTypes();
-                if (pt.length == 4 && pt[1] == float.class && pt[2] == float.class && pt[3] == float.class
-                        && p.args[2] instanceof Float && (Float) p.args[2] < TILT)
-                    p.args[2] = TILT;
+                if (pt.length != 4 || pt[1] != float.class || pt[2] != float.class || pt[3] != float.class) return;
+                if ((Float) p.args[1] < BUILDINGS_ZOOM) p.args[1] = BUILDINGS_ZOOM;
+                if ((Float) p.args[2] < TILT) p.args[2] = TILT;
             }
         });
-        log("Google 3D view on (tilt " + TILT + "°, camera class " + cp.getName() + ")");
+        log("Google 3D view ready (camera class " + cp.getName() + ")");
+    }
+
+    // ---- 3D buildings switch: map transaction 41 = setBuildingsEnabled(boolean) ----
+    static final int TX_SET_BUILDINGS = 41;
+    static final ThreadLocal<Boolean> injectingBuildings = new ThreadLocal<Boolean>();
+    static final java.util.Set<Method> boolSettersHooked = new java.util.HashSet<Method>();
+    static volatile Method setBuildingsMethod;
+
+    /** Turn 3D buildings on, learn which engine method did it, and stop the app from switching them off again. */
+    static void enableGoogleBuildings(android.os.Binder engine) {
+        for (Class<?> k = engine.getClass(); k != null && k != android.os.Binder.class; k = k.getSuperclass())
+            for (final Method m : k.getDeclaredMethods()) {
+                Class<?>[] pt = m.getParameterTypes();
+                if (m.getReturnType() != void.class || pt.length != 1 || pt[0] != boolean.class) continue;
+                synchronized (boolSettersHooked) { if (!boolSettersHooked.add(m)) continue; }
+                XposedBridge.hookAllMethods(m.getDeclaringClass(), m.getName(), new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        if (!(p.method instanceof Method) || !sameSig((Method) p.method, m)) return;
+                        if (Boolean.TRUE.equals(injectingBuildings.get())) { if (setBuildingsMethod == null) setBuildingsMethod = m; return; }
+                        if (setBuildingsMethod != null && sameSig((Method) p.method, setBuildingsMethod) && Boolean.FALSE.equals(p.args[0])) {
+                            p.args[0] = Boolean.TRUE;
+                            log("app tried to turn 3D buildings off, kept them on");
+                        }
+                    }
+                });
+            }
+        android.os.Parcel d = android.os.Parcel.obtain(), r = android.os.Parcel.obtain();
+        try {
+            d.writeInterfaceToken(MAP_DELEGATE);
+            d.writeInt(1);
+            injectingBuildings.set(Boolean.TRUE);
+            engine.transact(TX_SET_BUILDINGS, d, r, 0);
+            r.readException();
+            log("3D buildings on (setBuildingsEnabled=" + (setBuildingsMethod == null ? "not identified" : setBuildingsMethod.getName()) + ")");
+        } catch (Throwable t) { log(t); }
+        finally { injectingBuildings.remove(); d.recycle(); r.recycle(); }
     }
 
     static void tiltGoogle(android.os.Binder engine) {
@@ -150,7 +197,10 @@ public class Hook implements IXposedHookLoadPackage {
             engine.transact(1, d, r, 0);
             r.readException();
             if (r.readInt() == 0) return;
-            Object pos = ((android.os.Parcelable.Creator<?>) getField(null, cp, "CREATOR")).createFromParcel(r);
+            Object pos;
+            tilting.set(Boolean.TRUE);
+            try { pos = ((android.os.Parcelable.Creator<?>) getField(null, cp, "CREATOR")).createFromParcel(r); }
+            finally { tilting.remove(); }
             // 2) factory.newCameraPosition(pos) -> CameraUpdate wrapper
             d.recycle(); r.recycle(); d = android.os.Parcel.obtain(); r = android.os.Parcel.obtain();
             d.writeInterfaceToken(CAMERA_FACTORY);
@@ -204,8 +254,12 @@ public class Hook implements IXposedHookLoadPackage {
                 android.os.Handler main = new android.os.Handler(Looper.getMainLooper());
                 // attachInterface runs inside the engine's constructor: wait until it is fully built.
                 main.post(new Runnable() { public void run() { onGoogleEngine(engine); } });
-                if (tilt3d) for (long delay : new long[]{1500, 4000, 8000})   // the map may still be loading at first
-                    main.postDelayed(new Runnable() { public void run() { tiltGoogle(engine); } }, delay);
+                if (tilt3d) {
+                    main.post(new Runnable() { public void run() { enableGoogleBuildings(engine); } });
+                    // Tilt only while the map settles on its first position, then leave the camera to the user.
+                    for (long delay : new long[]{2000, 5000})
+                        main.postDelayed(new Runnable() { public void run() { tiltGoogle(engine); } }, delay);
+                }
             }
         });
     }
