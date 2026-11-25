@@ -57,13 +57,126 @@ public class Hook implements IXposedHookLoadPackage {
         try { gJson = Themes.google(theme); } catch (Throwable t) { log(t); }
 
         safe(new Runnable() { public void run() { hookGoogle(); } });
+        safe(new Runnable() { public void run() { hookGoogleEngine(); } });
         safe(new Runnable() { public void run() { hookMapbox(); } });
         safe(new Runnable() { public void run() { hookMapLibre("org.maplibre.android.maps"); } });
         safe(new Runnable() { public void run() { hookMapLibre("com.mapbox.mapboxsdk.maps"); } });
         safe(new Runnable() { public void run() { hookMapboxPuck(); } });
     }
 
-    // ---------------- Google Maps Android SDK ----------------
+    // ---------------- Google Maps engine (works even when the app renamed the SDK's classes) ----------------
+    //
+    // Apps shrink/rename play-services-maps, so "GoogleMap" usually doesn't exist by name. What can't be renamed:
+    //  - the engine registers itself with Binder.attachInterface(this, "com.google.android.gms.maps.internal.IGoogleMapDelegate")
+    //  - setMapStyle is transaction 91 of that interface (fixed, so apps and Play services stay compatible)
+    // So: catch the engine when it is created, send it transaction 91 with our style, note which engine method
+    // handled it (that's the real setMapStyle), and hook that method so the app's own styles get swapped for ours.
+    static final String MAP_DELEGATE = "com.google.android.gms.maps.internal.IGoogleMapDelegate";
+    static final int TX_SET_MAP_STYLE = 91;
+    static final ThreadLocal<Boolean> injecting = new ThreadLocal<Boolean>();
+    static final java.util.Set<Method> candidatesHooked = new java.util.HashSet<Method>();
+    static volatile Method setStyleMethod;           // learned from our own transaction
+    static final Map<Class<?>, Object> styleObjs = new java.util.HashMap<Class<?>, Object>();
+
+    static void hookGoogleEngine() {
+        if (gJson == null) return;
+        XposedBridge.hookAllMethods(android.os.Binder.class, "attachInterface", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam p) {
+                if (!MAP_DELEGATE.equals(p.args[1]) || !(p.thisObject instanceof android.os.Binder)) return;
+                final android.os.Binder engine = (android.os.Binder) p.thisObject;
+                // attachInterface runs inside the engine's constructor: wait until it is fully built.
+                new android.os.Handler(Looper.getMainLooper()).post(new Runnable() {
+                    public void run() { onGoogleEngine(engine); }
+                });
+            }
+        });
+    }
+
+    static void onGoogleEngine(android.os.Binder engine) {
+        try {
+            hookStyleCandidates(engine.getClass());
+            Class<?> styleCls = setStyleMethod != null ? setStyleMethod.getParameterTypes()[0] : firstCandidateParam(engine.getClass());
+            if (styleCls == null) { log("Google map engine found but no setMapStyle-like method on " + engine.getClass()); return; }
+            Object style = styleObj(styleCls);
+            android.os.Parcel data = android.os.Parcel.obtain(), reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(MAP_DELEGATE);
+                data.writeInt(1);                                   // "non-null parcelable follows"
+                ((android.os.Parcelable) style).writeToParcel(data, 0);
+                injecting.set(Boolean.TRUE);
+                engine.transact(TX_SET_MAP_STYLE, data, reply, 0);
+                reply.readException();
+                boolean ok = reply.readInt() != 0;
+                log("Google map themed (engine " + engine.getClass().getName() + ", style accepted=" + ok
+                        + ", setMapStyle=" + (setStyleMethod == null ? "not identified" : setStyleMethod.getName()) + ")");
+            } finally {
+                injecting.remove();
+                data.recycle();
+                reply.recycle();
+            }
+        } catch (Throwable t) { log(t); }
+    }
+
+    /** Methods shaped like setMapStyle(MapStyleOptions): boolean m(P) where P is a Parcelable holding just one String. */
+    static java.util.List<Method> styleCandidates(Class<?> c) {
+        java.util.List<Method> out = new java.util.ArrayList<Method>();
+        for (Class<?> k = c; k != null && k != android.os.Binder.class; k = k.getSuperclass())
+            for (Method m : k.getDeclaredMethods()) {
+                Class<?>[] pt = m.getParameterTypes();
+                if (m.getReturnType() != boolean.class || pt.length != 1 || java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                if (isStyleOptions(pt[0])) out.add(m);
+            }
+        return out;
+    }
+
+    static boolean isStyleOptions(Class<?> p) {
+        if (p.isInterface() || !android.os.Parcelable.class.isAssignableFrom(p)) return false;
+        try { p.getDeclaredField("CREATOR"); } catch (NoSuchFieldException e) { return false; }
+        int strings = 0, others = 0;
+        for (Field f : p.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            if (f.getType() == String.class) strings++; else others++;
+        }
+        return strings == 1 && others == 0;
+    }
+
+    static Class<?> firstCandidateParam(Class<?> c) {
+        java.util.List<Method> l = styleCandidates(c);
+        return l.isEmpty() ? null : l.get(0).getParameterTypes()[0];
+    }
+
+    static synchronized void hookStyleCandidates(Class<?> c) {
+        for (final Method m : styleCandidates(c)) {
+            if (!candidatesHooked.add(m)) continue;
+            XposedBridge.hookAllMethods(m.getDeclaringClass(), m.getName(), new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if (!(p.method instanceof Method) || !sameSig((Method) p.method, m)) return;
+                    if (Boolean.TRUE.equals(injecting.get())) {          // our transaction 91 landed here: this is setMapStyle
+                        if (setStyleMethod == null) setStyleMethod = m;
+                        return;
+                    }
+                    if (setStyleMethod == null || !sameSig((Method) p.method, setStyleMethod)) return;
+                    try {
+                        Object ours = styleObj(m.getParameterTypes()[0]);
+                        if (p.args[0] != ours) { p.args[0] = ours; log("app tried to set its own map style, kept MapSkin's"); }
+                    } catch (Throwable t) { log(t); }
+                }
+            });
+        }
+    }
+
+    static boolean sameSig(Method a, Method b) {
+        return a.getName().equals(b.getName()) && a.getDeclaringClass() == b.getDeclaringClass()
+                && java.util.Arrays.equals(a.getParameterTypes(), b.getParameterTypes());
+    }
+
+    static synchronized Object styleObj(Class<?> styleCls) throws Exception {
+        Object o = styleObjs.get(styleCls);
+        if (o == null) { o = newInst(styleCls, gJson); styleObjs.put(styleCls, o); }
+        return o;
+    }
+
+    // ---------------- Google Maps Android SDK (apps that kept the real class names) ----------------
     static void hookGoogle() {
         Class<?> gm = find("com.google.android.gms.maps.GoogleMap");
         final Class<?> mso = find("com.google.android.gms.maps.model.MapStyleOptions");

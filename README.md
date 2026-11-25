@@ -13,7 +13,7 @@ An Xposed / LSPosed / Vector module that re-skins the maps inside other apps and
 |---|---|---|
 | Mapbox Maps SDK v10/v11 | ✅ full style swap | ✅ replaces the 2D puck |
 | MapLibre / legacy Mapbox (v9 and older) | ✅ full style swap | ❌ |
-| Google Maps Android SDK | ✅ colour style | ✅ replaces the blue dot |
+| Google Maps Android SDK | ✅ colour style, even in apps that rename/shrink the SDK (e.g. Bump) | ✅ replaces the blue dot (only in apps that kept the SDK's class names) |
 | Google Maps app, Waze | ❌ (they use their own engines) | ❌ |
 
 Mapbox/MapLibre themes are built from the free [OpenFreeMap](https://openfreemap.org) "liberty" style, which the app downloads when you tap **Apply**.
@@ -22,9 +22,14 @@ Mapbox/MapLibre themes are built from the free [OpenFreeMap](https://openfreemap
 1. Install `MapSkin.apk`, enable it in Vector/LSPosed and tick your map apps in its scope.
 2. Open **MapSkin**, pick a theme and an icon, then tap **Apply**.
 3. Force-stop the map app and reopen it.
-4. If nothing changes, check the Vector/LSPosed logs for lines starting with `MapSkin:`.
+4. If nothing changes, check the Vector/LSPosed logs (or `adb logcat -s MapSkin`) for lines starting with `MapSkin:`. They say whether the module is switched off, which map engine it found, and when it replaced a style.
 
 ## Building (no Gradle needed)
+On Windows with Android Studio's SDK and a JDK installed:
+```powershell
+.uild.ps1
+```
+
 On Debian/Ubuntu (works inside Termux proot-distro):
 ```sh
 apt install openjdk-21-jdk-headless aapt apksigner zipalign dalvik-exchange android-sdk-platform-23
