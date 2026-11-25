@@ -148,6 +148,29 @@ public class Hook implements IXposedHookLoadPackage {
         log("Google 3D view ready (camera class " + cp.getName() + ")");
     }
 
+    // ---- MapSkin's own 3D buildings for zoom 13-16, where Google draws none: map transaction 13 = addTileOverlay ----
+    static final int TX_ADD_TILE_OVERLAY = 13;
+
+    static void addBuildingOverlay(android.os.Binder engine) {
+        Context ctx = app();
+        if (ctx == null) return;
+        String[] c = Themes.palette(theme);
+        String edge = Themes.BUILDING_EDGE[Themes.index(theme)];
+        BuildingTiles tiles = new BuildingTiles(ctx, android.graphics.Color.parseColor(c[8]),
+                android.graphics.Color.parseColor(edge != null ? edge : c[5]));
+        android.os.Parcel d = android.os.Parcel.obtain(), r = android.os.Parcel.obtain();
+        try {
+            d.writeInterfaceToken(MAP_DELEGATE);
+            d.writeInt(1);                         // non-null TileOverlayOptions follows
+            tiles.writeOverlayOptions(d);
+            engine.transact(TX_ADD_TILE_OVERLAY, d, r, 0);
+            r.readException();
+            log("3D buildings overlay added (zoom " + BuildingTiles.MIN_ZOOM + "-" + BuildingTiles.MAX_ZOOM
+                    + ", overlay=" + (r.readStrongBinder() != null) + ")");
+        } catch (Throwable t) { log(t); }
+        finally { d.recycle(); r.recycle(); }
+    }
+
     // ---- 3D buildings switch: map transaction 41 = setBuildingsEnabled(boolean) ----
     static final int TX_SET_BUILDINGS = 41;
     static final ThreadLocal<Boolean> injectingBuildings = new ThreadLocal<Boolean>();
@@ -256,6 +279,7 @@ public class Hook implements IXposedHookLoadPackage {
                 main.post(new Runnable() { public void run() { onGoogleEngine(engine); } });
                 if (tilt3d) {
                     main.post(new Runnable() { public void run() { enableGoogleBuildings(engine); } });
+                    main.post(new Runnable() { public void run() { addBuildingOverlay(engine); } });
                     // Tilt only while the map settles on its first position, then leave the camera to the user.
                     for (long delay : new long[]{2000, 5000})
                         main.postDelayed(new Runnable() { public void run() { tiltGoogle(engine); } }, delay);
