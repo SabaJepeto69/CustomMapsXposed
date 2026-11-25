@@ -44,7 +44,7 @@ public class MainActivity extends Activity {
     boolean active;
     String themeId, iconId, customB64;
     ImageView preview;
-    RadioGroup iconGroup;
+    RadioGroup iconGroup, themeGroup;
     TextView appsView;
 
     @SuppressWarnings("deprecation")
@@ -90,8 +90,24 @@ public class MainActivity extends Activity {
         });
         root.addView(enabled);
 
+        root.addView(header("Game bundles"));
+        root.addView(text("One tap picks a matching map theme and player arrow. Then tap Apply.", 13));
+        for (final String[] bundle : Themes.BUNDLES) {
+            Button bb = new Button(this);
+            bb.setText(bundle[1]);
+            bb.setAllCaps(false);
+            bb.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    themeGroup.check(100 + Themes.index(bundle[2]));
+                    iconGroup.check(200 + java.util.Arrays.asList(Icons.IDS).indexOf(bundle[3]));
+                    Toast.makeText(MainActivity.this, "Bundle selected. Tap Apply to use it.", Toast.LENGTH_SHORT).show();
+                }
+            });
+            root.addView(bb);
+        }
+
         root.addView(header("Map theme"));
-        RadioGroup themes = new RadioGroup(this);
+        final RadioGroup themes = themeGroup = new RadioGroup(this);
         for (int i = 0; i < Themes.IDS.length; i++) {
             RadioButton r = new RadioButton(this);
             r.setId(100 + i);
@@ -213,7 +229,7 @@ public class MainActivity extends Activity {
             customB64 = Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP);
             iconId = "custom";
             sp.edit().putString("icon", iconId).putString("icon_b64", customB64).commit();
-            iconGroup.check(200 + 4);
+            iconGroup.check(200 + java.util.Arrays.asList(Icons.IDS).indexOf("custom"));
             updatePreview();
         } catch (Throwable t) {
             Toast.makeText(this, "Couldn't load that image: " + t, Toast.LENGTH_LONG).show();
