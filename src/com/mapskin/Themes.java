@@ -21,7 +21,7 @@ public final class Themes {
 
     // Index: 0 bg  1 park  2 wood  3 water  4 road  5 roadMajor  6 casing  7 building  8 bld3d  9 label  10 halo  11 highway
     static final String[][] P = {
-        {"#05070d", "#0a1c1c", "#08161a", "#02111c", "#0e4a55", "#00e5ff", "#000000", "#0c1424", "#13223d", "#5ef6ff", "#000000", "#fcee0a"},
+        {"#0b0a10", "#121a16", "#0f1512", "#081822", "#3b1a20", "#ff4d5e", "#000000", "#2a0b12", "#d01f3c", "#5ef6ff", "#000000", "#fcee0a"},
         {"#eadbc6", "#86c98a", "#6fb874", "#2fc6d9", "#ffffff", "#ffd166", "#b58aa6", "#ddcab4", "#d1b79c", "#3b1f4a", "#ffffff", "#ff4fa0"},
         {"#0a0618", "#12203a", "#0f1a30", "#061a3a", "#ff2bd6", "#00f0ff", "#000000", "#1a0f33", "#2a1550", "#e0f7ff", "#000000", "#00f0ff"},
         {"#ffd6c2", "#7fd6a8", "#5cbf8e", "#2ec4d6", "#ffffff", "#ff6f91", "#8a3b6b", "#ffb5a7", "#ff8fa3", "#4a1942", "#ffffff", "#ff6f91"},
@@ -34,6 +34,8 @@ public final class Themes {
     static final boolean[] HIDE_TRANSIT = {true,  false, false, false, false, true};
     static final boolean[] FEW_LABELS   = {true,  false, false, false, false, false};
     static final double[]  ROAD_WEIGHT  = {1.2,   1.6,   1.0,   1.0,   1.0,   1.0};
+    /** Glowing building edges (null = none). Neon City: dark-red blocks with neon-red outlines, red 3D extrusions. */
+    static final String[]  BUILDING_EDGE = {"#ff3b4f", null, null, null, null, null};
 
     /** Bundles: a theme plus a matching player icon, picked together. {id, label, theme, icon} */
     public static final String[][] BUNDLES = {
@@ -70,6 +72,11 @@ public final class Themes {
         add(a, "landscape.natural", "geometry", "color", c[0]);
         add(a, "landscape.natural.terrain", "geometry", "color", c[2]);
         add(a, "landscape.man_made", "geometry", "color", c[7]);
+        if (BUILDING_EDGE[t] != null) {
+            // Google's 3D buildings (tilted view, high zoom) take their fill and edge colours from these.
+            add(a, "landscape.man_made", "geometry.fill", "color", c[8], "lightness", -35);
+            add(a, "landscape.man_made", "geometry.stroke", "color", BUILDING_EDGE[t], "weight", 1.5);
+        }
         add(a, "poi", "geometry", "color", c[0]);
         add(a, "poi.park", "geometry", "color", c[1]);
         add(a, "water", "geometry", "color", c[3]);
@@ -122,8 +129,15 @@ public final class Themes {
             else if (line && !lid.contains("rail") && lid.matches(".*(motorway|trunk).*")) p.put("line-color", c[11]);
             else if (line && !lid.contains("rail") && lid.matches(".*primary.*")) p.put("line-color", c[5]);
             else if (line && lid.matches("(road|bridge|tunnel)_(minor|secondary|service|link|street|path).*")) p.put("line-color", c[4]);
-            else if (lid.equals("building")) p.put("fill-color", c[7]);
-            else if (t.equals("fill-extrusion")) { p.put("fill-extrusion-color", c[8]); p.put("fill-extrusion-opacity", 0.95); }
+            else if (lid.equals("building")) {
+                p.put("fill-color", c[7]);
+                if (BUILDING_EDGE[ti] != null) p.put("fill-outline-color", BUILDING_EDGE[ti]);
+            }
+            else if (t.equals("fill-extrusion")) {
+                p.put("fill-extrusion-color", c[8]);
+                p.put("fill-extrusion-opacity", BUILDING_EDGE[ti] != null ? 0.88 : 0.95);
+                if (BUILDING_EDGE[ti] != null) p.put("fill-extrusion-vertical-gradient", true);   // darker at street level, brighter tops
+            }
             else if (t.equals("symbol")) {
                 if ((lid.startsWith("poi") && HIDE_POI[ti]) || (lid.contains("transit") && HIDE_TRANSIT[ti])) { hide(l); continue; }
                 if (lay != null && lay.has("text-field")) { p.put("text-color", c[9]); p.put("text-halo-color", c[10]); }
