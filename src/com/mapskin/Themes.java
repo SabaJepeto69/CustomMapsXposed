@@ -37,10 +37,10 @@ public final class Themes {
     /** Glowing building edges (null = none). Neon City: dark-red blocks with neon-red outlines, red 3D extrusions. */
     static final String[]  BUILDING_EDGE = {"#ff3b4f", null, null, null, null, null};
 
-    /** Bundles: a theme plus a matching player icon, picked together. {id, label, theme, icon} */
+    /** Bundles: a theme plus a matching player icon and view, picked together. {id, label, theme, icon, view} */
     public static final String[][] BUNDLES = {
-        {"neoncity", "Neon City: cyberpunk-game style map + glowing neon chevron", "neoncity", "chevron"},
-        {"sunshine", "Sunshine Coast: crime-game style map + white radar arrow", "sunshine", "radar"},
+        {"neoncity", "Neon City: cyberpunk-game style 3D map + glowing neon chevron", "neoncity", "chevron", "3d"},
+        {"sunshine", "Sunshine Coast: crime-game style map + white radar arrow", "sunshine", "radar", "flat"},
     };
 
     static int index(String id) {

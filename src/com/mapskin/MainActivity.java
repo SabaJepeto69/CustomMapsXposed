@@ -45,6 +45,7 @@ public class MainActivity extends Activity {
     String themeId, iconId, customB64;
     ImageView preview;
     RadioGroup iconGroup, themeGroup;
+    Switch tilt3d;
     TextView appsView;
 
     @SuppressWarnings("deprecation")
@@ -90,6 +91,15 @@ public class MainActivity extends Activity {
         });
         root.addView(enabled);
 
+        tilt3d = new Switch(this);
+        tilt3d.setText("3D view (tilt the map so buildings stand up)");
+        tilt3d.setChecked(sp.getBoolean("tilt3d", false));
+        tilt3d.setPadding(0, dp(4), 0, dp(4));
+        tilt3d.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            public void onCheckedChanged(android.widget.CompoundButton b, boolean on) { sp.edit().putBoolean("tilt3d", on).commit(); }
+        });
+        root.addView(tilt3d);
+
         root.addView(header("Game bundles"));
         root.addView(text("One tap picks a matching map theme and player arrow. Then tap Apply.", 13));
         for (final String[] bundle : Themes.BUNDLES) {
@@ -100,6 +110,7 @@ public class MainActivity extends Activity {
                 public void onClick(View v) {
                     themeGroup.check(100 + Themes.index(bundle[2]));
                     iconGroup.check(200 + java.util.Arrays.asList(Icons.IDS).indexOf(bundle[3]));
+                    tilt3d.setChecked("3d".equals(bundle[4]));
                     Toast.makeText(MainActivity.this, "Bundle selected. Tap Apply to use it.", Toast.LENGTH_SHORT).show();
                 }
             });

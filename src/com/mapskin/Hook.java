@@ -28,7 +28,8 @@ public class Hook implements IXposedHookLoadPackage {
 
     static String theme, gJson, mbJson, iconId, iconB64, styleUri;
     static Bitmap icon;
-    static boolean iconLoaded;
+    static boolean iconLoaded, tilt3d;
+    static final float TILT = 55f;   // degrees; Google and Mapbox clamp it at low zoom
     static ClassLoader cl;
     static final Map<Object, Object> markers = new WeakHashMap<Object, Object>();
 
@@ -51,8 +52,9 @@ public class Hook implements IXposedHookLoadPackage {
         mbJson = sp.getString("mbjson", null);
         iconId = sp.getString("icon", "off");
         iconB64 = sp.getString("icon_b64", null);
+        tilt3d = sp.getBoolean("tilt3d", false);
         cl = lp.classLoader;
-        log("loaded into " + lp.packageName + ": theme=" + theme + " icon=" + iconId
+        log("loaded into " + lp.packageName + ": theme=" + theme + " icon=" + iconId + " 3D=" + tilt3d
                 + " mapboxStyle=" + (mbJson == null ? "missing (tap Apply with internet on)" : mbJson.length() + " chars"));
         try { gJson = Themes.google(theme); } catch (Throwable t) { log(t); }
 
@@ -62,6 +64,110 @@ public class Hook implements IXposedHookLoadPackage {
         safe(new Runnable() { public void run() { hookMapLibre("org.maplibre.android.maps"); } });
         safe(new Runnable() { public void run() { hookMapLibre("com.mapbox.mapboxsdk.maps"); } });
         safe(new Runnable() { public void run() { hookMapboxPuck(); } });
+        if (tilt3d) safe(new Runnable() { public void run() { hookMapboxTilt(); } });
+    }
+
+    // ---------------- 3D view: tilt the camera so 3D buildings stand up ----------------
+
+    /** Mapbox v10/v11: every camera change goes through a CameraOptions; give each one our pitch. */
+    static void hookMapboxTilt() {
+        Class<?> co = find("com.mapbox.maps.CameraOptions");
+        if (co == null) return;
+        int n = 0;
+        for (final Constructor<?> k : co.getDeclaredConstructors()) {
+            final java.util.List<Integer> dbl = new java.util.ArrayList<Integer>();
+            Class<?>[] pt = k.getParameterTypes();
+            for (int i = 0; i < pt.length; i++) if (pt[i] == Double.class) dbl.add(i);
+            if (dbl.size() != 3) continue;                     // (center, padding, anchor, zoom, bearing, pitch)
+            final int pitch = dbl.get(2);
+            XposedBridge.hookAllConstructors(co, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if (p.args.length <= pitch || !(p.method instanceof Constructor)
+                            || !java.util.Arrays.equals(((Constructor<?>) p.method).getParameterTypes(), k.getParameterTypes())) return;
+                    Object v = p.args[pitch];
+                    if (v == null || ((Double) v) < TILT) p.args[pitch] = (double) TILT;
+                }
+            });
+            n++;
+            break;
+        }
+        if (n > 0) log("Mapbox 3D view on (pitch " + TILT + "°)");
+    }
+
+    // Google: camera moves go through the engine's camera-update factory, found the same way as the map engine.
+    // Fixed transaction numbers: map 1 = getCameraPosition, map 4 = moveCamera, factory 7 = newCameraPosition.
+    static final String CAMERA_FACTORY = "com.google.android.gms.maps.internal.ICameraUpdateFactoryDelegate";
+    static volatile android.os.Binder cameraFactory;
+    static final java.util.Set<Class<?>> cameraClassesHooked = new java.util.HashSet<Class<?>>();
+
+    /** The renamed CameraPosition: a Parcelable with one object field (LatLng target) and three floats (zoom, tilt, bearing). */
+    static boolean isCameraPosition(Class<?> p) {
+        if (p.isInterface() || !android.os.Parcelable.class.isAssignableFrom(p)) return false;
+        try { p.getDeclaredField("CREATOR"); } catch (NoSuchFieldException e) { return false; }
+        int floats = 0, objs = 0, others = 0;
+        for (Field f : p.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            if (f.getType() == float.class) floats++;
+            else if (!f.getType().isPrimitive()) objs++;
+            else others++;
+        }
+        return floats == 3 && objs == 1 && others == 0;
+    }
+
+    static Class<?> cameraPositionClass(Object factory) {
+        for (Class<?> k = factory.getClass(); k != null && k != android.os.Binder.class; k = k.getSuperclass())
+            for (Method m : k.getDeclaredMethods()) {
+                Class<?>[] pt = m.getParameterTypes();
+                if (pt.length == 1 && isCameraPosition(pt[0])) return pt[0];
+            }
+        return null;
+    }
+
+    /** CameraPosition(target, zoom, tilt, bearing): raise the tilt in every camera position the app or engine builds. */
+    static synchronized void hookCameraPosition(Class<?> cp) {
+        if (!cameraClassesHooked.add(cp)) return;
+        XposedBridge.hookAllConstructors(cp, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam p) {
+                Class<?>[] pt = ((Constructor<?>) p.method).getParameterTypes();
+                if (pt.length == 4 && pt[1] == float.class && pt[2] == float.class && pt[3] == float.class
+                        && p.args[2] instanceof Float && (Float) p.args[2] < TILT)
+                    p.args[2] = TILT;
+            }
+        });
+        log("Google 3D view on (tilt " + TILT + "°, camera class " + cp.getName() + ")");
+    }
+
+    static void tiltGoogle(android.os.Binder engine) {
+        android.os.Binder factory = cameraFactory;
+        if (factory == null) { log("3D view: no camera factory yet"); return; }
+        Class<?> cp = cameraPositionClass(factory);
+        if (cp == null) { log("3D view: couldn't find CameraPosition on " + factory.getClass()); return; }
+        hookCameraPosition(cp);
+        android.os.Parcel d = android.os.Parcel.obtain(), r = android.os.Parcel.obtain();
+        try {
+            // 1) current camera; decoding it goes through the hooked constructor, so it comes back tilted
+            d.writeInterfaceToken(MAP_DELEGATE);
+            engine.transact(1, d, r, 0);
+            r.readException();
+            if (r.readInt() == 0) return;
+            Object pos = ((android.os.Parcelable.Creator<?>) getField(null, cp, "CREATOR")).createFromParcel(r);
+            // 2) factory.newCameraPosition(pos) -> CameraUpdate wrapper
+            d.recycle(); r.recycle(); d = android.os.Parcel.obtain(); r = android.os.Parcel.obtain();
+            d.writeInterfaceToken(CAMERA_FACTORY);
+            d.writeInt(1);
+            ((android.os.Parcelable) pos).writeToParcel(d, 0);
+            factory.transact(7, d, r, 0);
+            r.readException();
+            android.os.IBinder update = r.readStrongBinder();
+            // 3) map.moveCamera(update)
+            d.recycle(); r.recycle(); d = android.os.Parcel.obtain(); r = android.os.Parcel.obtain();
+            d.writeInterfaceToken(MAP_DELEGATE);
+            d.writeStrongBinder(update);
+            engine.transact(4, d, r, 0);
+            r.readException();
+            log("3D view: map tilted");
+        } catch (Throwable t) { log(t); }
+        finally { d.recycle(); r.recycle(); }
     }
 
     // ---------------- Google Maps engine (works even when the app renamed the SDK's classes) ----------------
@@ -82,12 +188,24 @@ public class Hook implements IXposedHookLoadPackage {
         if (gJson == null) return;
         XposedBridge.hookAllMethods(android.os.Binder.class, "attachInterface", new XC_MethodHook() {
             @Override protected void afterHookedMethod(MethodHookParam p) {
-                if (!MAP_DELEGATE.equals(p.args[1]) || !(p.thisObject instanceof android.os.Binder)) return;
+                if (!(p.thisObject instanceof android.os.Binder)) return;
+                if (tilt3d && CAMERA_FACTORY.equals(p.args[1])) {
+                    final android.os.Binder f = (android.os.Binder) p.thisObject;
+                    cameraFactory = f;
+                    new android.os.Handler(Looper.getMainLooper()).post(new Runnable() {   // hook app-built camera positions early
+                        public void run() {
+                            try { Class<?> cp = cameraPositionClass(f); if (cp != null) hookCameraPosition(cp); } catch (Throwable t) { log(t); }
+                        }
+                    });
+                    return;
+                }
+                if (!MAP_DELEGATE.equals(p.args[1])) return;
                 final android.os.Binder engine = (android.os.Binder) p.thisObject;
+                android.os.Handler main = new android.os.Handler(Looper.getMainLooper());
                 // attachInterface runs inside the engine's constructor: wait until it is fully built.
-                new android.os.Handler(Looper.getMainLooper()).post(new Runnable() {
-                    public void run() { onGoogleEngine(engine); }
-                });
+                main.post(new Runnable() { public void run() { onGoogleEngine(engine); } });
+                if (tilt3d) for (long delay : new long[]{1500, 4000, 8000})   // the map may still be loading at first
+                    main.postDelayed(new Runnable() { public void run() { tiltGoogle(engine); } }, delay);
             }
         });
     }
