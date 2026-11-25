@@ -25,7 +25,7 @@ import java.util.zip.GZIPInputStream;
 
 /**
  * A Google Maps tile provider (spoken to over Binder, so it works whatever the app renamed) that draws
- * raised "3D" buildings from OpenStreetMap data (OpenFreeMap vector tiles) at every zoom from 13 up, in place of
+ * raised "3D" buildings from Overture Maps / OpenStreetMap data at every zoom from 13 up, in place of
  * Google's own 3D buildings (which MapSkin switches off). Each building: shaded walls, a roof lifted by its real
  * height, neon edge.
  */
@@ -38,7 +38,7 @@ public final class BuildingTiles extends Binder {
     static final int SIZE = 512;             // tile bitmap size (crisp on high-dpi screens)
     // Game-map look (like apps on Mapbox's 3D engine): every building gets at least MIN_HEIGHT, and heights are
     // exaggerated more the further out you zoom, so blocks still read as 3D in suburbs and at city scale.
-    static final float MIN_HEIGHT = 10f;     // metres; OSM's default for untagged buildings (~3-6 m) looks flat
+    static final float MIN_HEIGHT = 4f;      // metres; even a shed stands up a little
     static final float EXAGGERATION = 1.8f;  // at zoom 16+; doubles every two zoom levels further out
 
     static float exaggeration(int z) {
@@ -49,7 +49,7 @@ public final class BuildingTiles extends Binder {
     final int roof, edge;
     String tileUrl;                           // e.g. https://tiles.openfreemap.org/planet/<version>/{z}/{x}/{y}.pbf
     final Map<String, byte[]> mem = Collections.synchronizedMap(new LinkedHashMap<String, byte[]>(64, 0.75f, true) {
-        protected boolean removeEldestEntry(Map.Entry<String, byte[]> e) { return size() > 48; }
+        protected boolean removeEldestEntry(Map.Entry<String, byte[]> e) { return size() > 40; }
     });
 
     BuildingTiles(Context ctx, int roof, int edge) {
@@ -114,6 +114,9 @@ public final class BuildingTiles extends Binder {
     static final class Building {
         final List<float[]> rings = new ArrayList<float[]>();   // x0,y0,x1,y1,... in tile pixels; first ring = outer
         float height, minHeight;
+        boolean known;                                           // height came from the data (else it's a guess)
+        String cls;                                              // Overture class, e.g. house, apartments, commercial
+        int idHash;                                              // stable per building (same in every tile it spans)
         float minX, minY, maxX, maxY;                            // outer ring bounds
         int orient = 1;                                          // +1 if the outer ring has positive area (MVT exterior)
         float depth;                                             // sort key for the current view
@@ -213,45 +216,103 @@ public final class BuildingTiles extends Binder {
         return o.toByteArray();
     }
 
-    /** Adds the buildings of map tile (x, y, z), shifted by (dx, dy) pixels, decoded from the matching vector tile. */
+    /**
+     * Adds the buildings of map tile (x, y, z), shifted by (dx, dy) pixels. Always decodes zoom-14 data: deeper zooms
+     * show part of one z14 tile, zoom 13 stitches four (lower-zoom data is thinned out and has no heights).
+     */
     void load(List<Building> out, int x, int y, int z, float dx, float dy) throws Exception {
-        int dz = Math.min(z, DATA_ZOOM), shift = z - dz;
+        if (z < DATA_ZOOM) {
+            int k = 1 << (DATA_ZOOM - z);
+            float s = SIZE / (float) k;
+            for (int j = 0; j < k; j++)
+                for (int i = 0; i < k; i++)
+                    decodeSource(out, DATA_ZOOM, x * k + i, y * k + j, s, -(i * s) - dx, -(j * s) - dy);
+            return;
+        }
+        int shift = z - DATA_ZOOM, sub = 1 << shift;
         int sx = x >> shift, sy = y >> shift;
+        float ox = (x - sx * sub), oy = (y - sy * sub);       // which part of the source tile this map tile shows
+        decodeSource(out, DATA_ZOOM, sx, sy, SIZE * sub, ox * SIZE - dx, oy * SIZE - dy);
+    }
+
+    /** Decodes one data tile drawn tilePx wide, minus (offX, offY), and fills in missing heights. */
+    void decodeSource(List<Building> out, int dz, int sx, int sy, float tilePx, float offX, float offY) throws Exception {
         byte[] pbf = fetch(dz, sx, sy);
         if (pbf == null) return;
-        int sub = 1 << shift;
-        float ox = (x - sx * sub), oy = (y - sy * sub);       // which part of the source tile this map tile shows
-        Mvt.decodeBuildings(pbf, out, SIZE * sub, ox * SIZE - dx, oy * SIZE - dy);
+        int start = out.size();
+        Mvt.decodeBuildings(pbf, out, tilePx, offX, offY);
+        double lat = Math.atan(Math.sinh(Math.PI * (1 - 2.0 * (sy + 0.5) / (1 << dz))));
+        double tileMetres = 40075016.686 * Math.cos(lat) / (1 << dz);
+        Heights.estimate(out.subList(start, out.size()), tilePx, offX, offY, tileMetres);
     }
 
     // ---------------- network + cache ----------------
 
+    /**
+     * Building footprints: Overture Maps (OpenStreetMap plus machine-traced footprints from Microsoft/Google, so far
+     * fewer missing buildings), read from its PMTiles archive. Falls back to OpenFreeMap if Overture can't be reached.
+     */
     byte[] fetch(int z, int x, int y) throws Exception {
         String key = z + "/" + x + "/" + y;
         byte[] b = mem.get(key);
         if (b != null) return b.length == 0 ? null : b;
         File dir = new File(ctx.getCacheDir(), "mapskin_buildings");
-        File f = new File(dir, z + "_" + x + "_" + y + ".pbf");
+        File f = new File(dir, "ov_" + z + "_" + x + "_" + y + ".pbf");
         if (f.isFile() && System.currentTimeMillis() - f.lastModified() < 30L * 24 * 3600 * 1000) {
             b = readAll(new FileInputStream(f));
         } else {
-            String url = url();
-            if (url == null) return null;
-            HttpURLConnection c = (HttpURLConnection) new URL(url.replace("{z}", "" + z).replace("{x}", "" + x).replace("{y}", "" + y)).openConnection();
-            c.setConnectTimeout(10000);
-            c.setReadTimeout(15000);
-            int code = c.getResponseCode();
-            b = code == 200 ? readAll(c.getInputStream()) : new byte[0];
-            if (code == 200 || code == 204 || code == 404) {
-                dir.mkdirs();
-                FileOutputStream o = new FileOutputStream(f);
-                o.write(b);
-                o.close();
+            b = null;
+            try {
+                Pmtiles ov = overture();
+                if (ov != null) { b = ov.tile(z, x, y); if (b == null) b = new byte[0]; }
+            } catch (Throwable t) { Hook.log("3D buildings: Overture tile " + key + " failed (" + t + "), using OpenFreeMap"); }
+            if (b == null) {
+                b = openFreeMap(z, x, y);
+                if (b == null) return null;
+                f = new File(dir, z + "_" + x + "_" + y + ".pbf");
             }
+            dir.mkdirs();
+            FileOutputStream o = new FileOutputStream(f);
+            o.write(b);
+            o.close();
         }
         if (b.length > 2 && (b[0] & 255) == 0x1f && (b[1] & 255) == 0x8b) b = readAll(new GZIPInputStream(new java.io.ByteArrayInputStream(b)));
         mem.put(key, b);
         return b.length == 0 ? null : b;
+    }
+
+    private Pmtiles overture;
+    private long overtureFailedAt;
+
+    /** The latest Overture release's buildings archive (from Overture's release catalog), or null if unreachable. */
+    synchronized Pmtiles overture() {
+        if (overture != null) return overture;
+        if (System.currentTimeMillis() - overtureFailedAt < 5 * 60 * 1000) return null;
+        try {
+            HttpURLConnection c = (HttpURLConnection) new URL("https://stac.overturemaps.org/catalog.json").openConnection();
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(15000);
+            String latest = new org.json.JSONObject(new String(readAll(c.getInputStream()), "UTF-8")).getString("latest");
+            overture = new Pmtiles("https://tiles.overturemaps.org/" + latest + "/buildings.pmtiles");
+            Hook.log("3D buildings: Overture release " + latest);
+            return overture;
+        } catch (Throwable t) {
+            overtureFailedAt = System.currentTimeMillis();
+            Hook.log("3D buildings: Overture catalog unreachable (" + t + ")");
+            return null;
+        }
+    }
+
+    /** Raw OpenFreeMap tile bytes; empty if it has none; null on network failure. */
+    byte[] openFreeMap(int z, int x, int y) throws Exception {
+        String url = url();
+        if (url == null) return null;
+        HttpURLConnection c = (HttpURLConnection) new URL(url.replace("{z}", "" + z).replace("{x}", "" + x).replace("{y}", "" + y)).openConnection();
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(15000);
+        int code = c.getResponseCode();
+        if (code == 200) return readAll(c.getInputStream());
+        return code == 204 || code == 404 ? new byte[0] : null;
     }
 
     synchronized String url() throws Exception {

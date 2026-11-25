@@ -39,4 +39,4 @@ Output: `build/MapSkin.apk`. `stubs/` holds compile-only Xposed API stubs; they 
 A signing keystore is generated on first build and is git-ignored.
 
 ## Credits
-Map data © OpenStreetMap contributors, tiles/style by OpenFreeMap.
+Map data © OpenStreetMap contributors, tiles/style by OpenFreeMap. 3D building footprints from [Overture Maps](https://overturemaps.org) (OSM, Microsoft, Google Open Buildings and others); heights are estimated where the data has none.

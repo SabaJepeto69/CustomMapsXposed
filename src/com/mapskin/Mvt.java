@@ -52,7 +52,7 @@ final class Mvt {
         int start = pos;
         String name = null;
         List<String> keys = new ArrayList<String>();
-        List<Double> values = new ArrayList<Double>();
+        List<Object> values = new ArrayList<Object>();
         int extent = 4096;
         while (pos < end) {
             long key = varint();
@@ -65,13 +65,18 @@ final class Mvt {
             if (name != null && !"building".equals(name)) return;
         }
         if (!"building".equals(name)) return;
+        // OpenFreeMap: render_height / render_min_height. Overture: height / min_height / num_floors / class.
         int hKey = keys.indexOf("render_height"), minKey = keys.indexOf("render_min_height");
+        if (hKey < 0) hKey = keys.indexOf("height");
+        if (minKey < 0) minKey = keys.indexOf("min_height");
+        int floorsKey = keys.indexOf("num_floors"), classKey = keys.indexOf("class"), ugKey = keys.indexOf("is_underground");
+        int idKey = keys.indexOf("id");
         float scale = size / extent;
         pos = start;
         while (pos < end) {
             long key = varint();
             if ((key >>> 3) == 2 && (key & 7) == 2) {
-                sub().readFeature(out, hKey, minKey, values, scale, offX, offY);
+                sub().readFeature(out, hKey, minKey, floorsKey, classKey, ugKey, idKey, values, scale, offX, offY);
             } else skip((int) (key & 7));
         }
     }
@@ -83,16 +88,18 @@ final class Mvt {
         return s;
     }
 
-    /** Value message; only numbers matter here (non-numbers become NaN). */
-    private Double readValue() {
-        double v = Double.NaN;
+    /** Value message: a Double for numbers, a String for strings, a Boolean for bools. */
+    private Object readValue() {
+        Object v = null;
         while (pos < end) {
             long key = varint();
             int field = (int) (key >>> 3), wire = (int) (key & 7);
-            if (field == 2 && wire == 5) { v = Float.intBitsToFloat(int32()); }
+            if (field == 1 && wire == 2) { int n = (int) varint(); v = str(n); }
+            else if (field == 2 && wire == 5) { v = (double) Float.intBitsToFloat(int32()); }
             else if (field == 3 && wire == 1) { v = Double.longBitsToDouble(int64()); }
-            else if ((field == 4 || field == 5) && wire == 0) v = varint();
-            else if (field == 6 && wire == 0) v = zigzag(varint());
+            else if ((field == 4 || field == 5) && wire == 0) v = (double) varint();
+            else if (field == 6 && wire == 0) v = (double) zigzag(varint());
+            else if (field == 7 && wire == 0) v = varint() != 0;
             else skip(wire);
         }
         return v;
@@ -106,9 +113,12 @@ final class Mvt {
      * One feature can hold many buildings (OpenFreeMap merges same-height buildings into a multipolygon):
      * every exterior ring (positive area in tile coordinates) starts a building, interior rings are its holes.
      */
-    private void readFeature(List<BuildingTiles.Building> out, int hKey, int minKey, List<Double> values, float scale, float offX, float offY) {
+    private void readFeature(List<BuildingTiles.Building> out, int hKey, int minKey, int floorsKey, int classKey, int ugKey,
+                             int idKey, List<Object> values, float scale, float offX, float offY) {
         int type = 0;
-        float height = 10f, minHeight = 0f;
+        float height = Float.NaN, minHeight = 0f, floors = Float.NaN;
+        String cls = null;
+        int idHash = 0;
         int geomStart = -1, geomEnd = -1;
         while (pos < end) {
             long key = varint();
@@ -118,10 +128,15 @@ final class Mvt {
                 int n = (int) varint(), stop = pos + n;
                 while (pos < stop) {
                     int k = (int) varint(), v = (int) varint();
-                    double d = v < values.size() ? values.get(v) : Double.NaN;
-                    if (Double.isNaN(d)) continue;
-                    if (k == hKey) height = (float) d;
-                    else if (k == minKey) minHeight = (float) d;
+                    Object o = v < values.size() ? values.get(v) : null;
+                    if (k == ugKey && Boolean.TRUE.equals(o)) return;          // underground: nothing to raise
+                    if (k == classKey && o instanceof String) cls = (String) o;
+                    if (k == idKey && o != null) idHash = o.hashCode();
+                    if (!(o instanceof Double)) continue;
+                    float d = ((Double) o).floatValue();
+                    if (k == hKey) height = d;
+                    else if (k == minKey) minHeight = d;
+                    else if (k == floorsKey) floors = d;
                 }
             } else if (field == 4 && wire == 2) {
                 int n = (int) varint();
@@ -129,6 +144,8 @@ final class Mvt {
             } else skip(wire);
         }
         if (type != 3 || geomStart < 0) return;                       // polygons only
+        boolean known = !Float.isNaN(height) || !Float.isNaN(floors);
+        if (Float.isNaN(height)) height = Float.isNaN(floors) ? 0f : floors * 3.2f;
 
         BuildingTiles.Building[] cur = new BuildingTiles.Building[1];
         pos = geomStart;
@@ -143,22 +160,22 @@ final class Mvt {
                     cx += zigzag(varint());
                     cy += zigzag(varint());
                     if (id == 1) {
-                        if (ring != null) addRing(out, cur, ring, rn, height, minHeight);
+                        if (ring != null) addRing(out, cur, ring, rn, height, minHeight, known, cls, idHash);
                         ring = new float[64]; rn = 0;
                     }
                     if (rn + 2 > ring.length) ring = java.util.Arrays.copyOf(ring, ring.length * 2);
                     ring[rn++] = cx * scale - offX; ring[rn++] = cy * scale - offY;
                 }
             } else if (id == 7) {
-                if (ring != null) addRing(out, cur, ring, rn, height, minHeight);
+                if (ring != null) addRing(out, cur, ring, rn, height, minHeight, known, cls, idHash);
                 ring = null; rn = 0;
             }
         }
-        if (ring != null) addRing(out, cur, ring, rn, height, minHeight);
+        if (ring != null) addRing(out, cur, ring, rn, height, minHeight, known, cls, idHash);
     }
 
     private static void addRing(List<BuildingTiles.Building> out, BuildingTiles.Building[] cur, float[] ring, int n,
-                                float height, float minHeight) {
+                                float height, float minHeight, boolean known, String cls, int idHash) {
         if (n < 6) return;
         double area = 0;
         for (int i = 0; i < n; i += 2) {
@@ -170,6 +187,9 @@ final class Mvt {
             BuildingTiles.Building bd = new BuildingTiles.Building();
             bd.height = height;
             bd.minHeight = minHeight;
+            bd.known = known;
+            bd.cls = cls;
+            bd.idHash = idHash;
             bd.orient = area >= 0 ? 1 : -1;
             bd.minX = bd.minY = Float.MAX_VALUE;
             bd.maxX = bd.maxY = -Float.MAX_VALUE;
