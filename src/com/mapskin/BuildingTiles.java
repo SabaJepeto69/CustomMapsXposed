@@ -25,14 +25,15 @@ import java.util.zip.GZIPInputStream;
 
 /**
  * A Google Maps tile provider (spoken to over Binder, so it works whatever the app renamed) that draws
- * raised "3D" buildings from OpenStreetMap data (OpenFreeMap vector tiles) at zoom levels where Google
- * doesn't draw its own 3D buildings. Each building: shaded walls, a roof lifted by its real height, neon edge.
+ * raised "3D" buildings from OpenStreetMap data (OpenFreeMap vector tiles) at every zoom from 13 up, in place of
+ * Google's own 3D buildings (which MapSkin switches off). Each building: shaded walls, a roof lifted by its real
+ * height, neon edge.
  */
 public final class BuildingTiles extends Binder {
     static final String DESC = "com.google.android.gms.maps.model.internal.ITileProviderDelegate";
     static final int TX_GET_TILE = 1;
     static final int MIN_ZOOM = 13;          // OpenMapTiles has buildings from z13
-    static final int MAX_ZOOM = 16;          // from z17 Google draws its own 3D buildings
+    static final int MAX_ZOOM = 21;          // Google's own 3D buildings are switched off, so draw all the way in
     static final int DATA_ZOOM = 14;         // highest zoom the vector tiles exist at
     static final int SIZE = 512;             // tile bitmap size (crisp on high-dpi screens)
     static final float LEAN = 0.55f;         // how far roofs are lifted per metre of height, relative to ground scale

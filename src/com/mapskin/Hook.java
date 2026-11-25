@@ -127,7 +127,7 @@ public class Hook implements IXposedHookLoadPackage {
         return null;
     }
 
-    static final float BUILDINGS_ZOOM = 17f;          // Google only draws 3D buildings from about street level
+    static final float BUILDINGS_ZOOM = BuildingTiles.MIN_ZOOM;   // MapSkin's own buildings show from here
     static final ThreadLocal<Boolean> tilting = new ThreadLocal<Boolean>();
 
     /**
@@ -177,8 +177,11 @@ public class Hook implements IXposedHookLoadPackage {
     static final java.util.Set<Method> boolSettersHooked = new java.util.HashSet<Method>();
     static volatile Method setBuildingsMethod;
 
-    /** Turn 3D buildings on, learn which engine method did it, and stop the app from switching them off again. */
-    static void enableGoogleBuildings(android.os.Binder engine) {
+    /**
+     * Turn Google's own 3D buildings off (MapSkin draws its own), learn which engine method did it,
+     * and stop the app from switching them back on.
+     */
+    static void disableGoogleBuildings(android.os.Binder engine) {
         for (Class<?> k = engine.getClass(); k != null && k != android.os.Binder.class; k = k.getSuperclass())
             for (final Method m : k.getDeclaredMethods()) {
                 Class<?>[] pt = m.getParameterTypes();
@@ -188,9 +191,9 @@ public class Hook implements IXposedHookLoadPackage {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         if (!(p.method instanceof Method) || !sameSig((Method) p.method, m)) return;
                         if (Boolean.TRUE.equals(injectingBuildings.get())) { if (setBuildingsMethod == null) setBuildingsMethod = m; return; }
-                        if (setBuildingsMethod != null && sameSig((Method) p.method, setBuildingsMethod) && Boolean.FALSE.equals(p.args[0])) {
-                            p.args[0] = Boolean.TRUE;
-                            log("app tried to turn 3D buildings off, kept them on");
+                        if (setBuildingsMethod != null && sameSig((Method) p.method, setBuildingsMethod) && Boolean.TRUE.equals(p.args[0])) {
+                            p.args[0] = Boolean.FALSE;
+                            log("app tried to turn Google's 3D buildings on, kept them off");
                         }
                     }
                 });
@@ -198,11 +201,11 @@ public class Hook implements IXposedHookLoadPackage {
         android.os.Parcel d = android.os.Parcel.obtain(), r = android.os.Parcel.obtain();
         try {
             d.writeInterfaceToken(MAP_DELEGATE);
-            d.writeInt(1);
+            d.writeInt(0);
             injectingBuildings.set(Boolean.TRUE);
             engine.transact(TX_SET_BUILDINGS, d, r, 0);
             r.readException();
-            log("3D buildings on (setBuildingsEnabled=" + (setBuildingsMethod == null ? "not identified" : setBuildingsMethod.getName()) + ")");
+            log("Google's 3D buildings off (setBuildingsEnabled=" + (setBuildingsMethod == null ? "not identified" : setBuildingsMethod.getName()) + ")");
         } catch (Throwable t) { log(t); }
         finally { injectingBuildings.remove(); d.recycle(); r.recycle(); }
     }
@@ -278,7 +281,7 @@ public class Hook implements IXposedHookLoadPackage {
                 // attachInterface runs inside the engine's constructor: wait until it is fully built.
                 main.post(new Runnable() { public void run() { onGoogleEngine(engine); } });
                 if (tilt3d) {
-                    main.post(new Runnable() { public void run() { enableGoogleBuildings(engine); } });
+                    main.post(new Runnable() { public void run() { disableGoogleBuildings(engine); } });
                     main.post(new Runnable() { public void run() { addBuildingOverlay(engine); } });
                     // Tilt only while the map settles on its first position, then leave the camera to the user.
                     for (long delay : new long[]{2000, 5000})
