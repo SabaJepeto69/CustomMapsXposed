@@ -76,7 +76,18 @@ public class MainActivity extends Activity {
 
         final Switch enabled = new Switch(this);
         enabled.setText("Re-skin maps");
+        enabled.setTextSize(18);
         enabled.setChecked(sp.getBoolean("enabled", true));
+        enabled.setPadding(0, dp(12), 0, dp(4));
+        // Saved straight away, so the hooked apps never see a stale on/off value.
+        enabled.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
+                sp.edit().putBoolean("enabled", on).commit();
+                Toast.makeText(MainActivity.this, on
+                        ? "Re-skinning ON. Force-stop your map apps and reopen them."
+                        : "Re-skinning OFF. Map apps will look normal after a restart.", Toast.LENGTH_SHORT).show();
+            }
+        });
         root.addView(enabled);
 
         root.addView(header("Map theme"));
@@ -106,6 +117,7 @@ public class MainActivity extends Activity {
             public void onCheckedChanged(RadioGroup g, int id) {
                 iconId = Icons.IDS[id - 200];
                 if ("custom".equals(iconId) && customB64 == null) pickImage();
+                else sp.edit().putString("icon", iconId).commit();
                 updatePreview();
             }
         });
@@ -130,7 +142,8 @@ public class MainActivity extends Activity {
         });
         root.addView(apply);
 
-        root.addView(text("After applying, force-stop the map app (App info → Force stop) and open it again.", 13));
+        root.addView(text("After applying, force-stop the map app (App info → Force stop) and open it again. "
+                + "An app only changes if it is ticked in MapSkin's scope in Vector/LSPosed.", 13));
 
         root.addView(header("Map apps found on this phone"));
         appsView = text("Scanning…", 14);
@@ -155,8 +168,10 @@ public class MainActivity extends Activity {
                         .putString("icon", icon)
                         .putString("icon_b64", b64);
                 if (mb != null) e.putString("mbjson", mb);
-                e.commit();
-                final String msg = err == null
+                boolean saved = e.commit();
+                final String msg = !saved
+                        ? "Couldn't save settings. Reboot the phone and try again."
+                        : err == null
                         ? "Saved! Force-stop your map apps and reopen them."
                         : "Saved, but couldn't download the base map for Mapbox/MapLibre apps (" + err + "). Check internet and press Apply again.";
                 runOnUiThread(new Runnable() { public void run() { Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show(); } });
@@ -197,6 +212,7 @@ public class MainActivity extends Activity {
             small.compress(Bitmap.CompressFormat.PNG, 100, o);
             customB64 = Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP);
             iconId = "custom";
+            sp.edit().putString("icon", iconId).putString("icon_b64", customB64).commit();
             iconGroup.check(200 + 4);
             updatePreview();
         } catch (Throwable t) {
@@ -213,25 +229,40 @@ public class MainActivity extends Activity {
         new Thread(new Runnable() {
             public void run() {
                 PackageManager pm = getPackageManager();
-                List<String> out = new ArrayList<String>();
+                List<String> sure = new ArrayList<String>(), maybe = new ArrayList<String>();
                 for (ApplicationInfo ai : pm.getInstalledApplications(PackageManager.GET_META_DATA)) {
                     if (ai.packageName.equals(getPackageName())) continue;
+                    if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0) continue;
                     String kind = detect(ai);
-                    if (kind != null) out.add("• " + pm.getApplicationLabel(ai) + "  (" + kind + ")\n   " + ai.packageName);
+                    if (kind == null) continue;
+                    String line = "• " + pm.getApplicationLabel(ai) + "  (" + kind + ")\n   " + ai.packageName;
+                    if (kind.startsWith("Google")) maybe.add(line); else sure.add(line);
                 }
-                Collections.sort(out, String.CASE_INSENSITIVE_ORDER);
+                Collections.sort(sure, String.CASE_INSENSITIVE_ORDER);
+                Collections.sort(maybe, String.CASE_INSENSITIVE_ORDER);
                 final StringBuilder sb = new StringBuilder();
-                for (String s : out) sb.append(s).append('\n');
-                if (out.isEmpty()) sb.append("None detected.");
+                sb.append("Mapbox / MapLibre maps (best support):\n");
+                for (String s : sure) sb.append(s).append('\n');
+                if (sure.isEmpty()) sb.append("None found.\n");
+                sb.append("\nOther apps with a Google Maps key (only the ones that really show a map will change):\n");
+                for (String s : maybe) sb.append(s).append('\n');
+                if (maybe.isEmpty()) sb.append("None found.");
                 runOnUiThread(new Runnable() { public void run() { appsView.setText(sb.toString()); } });
             }
         }).start();
     }
 
+    /** Mapbox/MapLibre are found by their native libraries (a sure sign); Google Maps only by its API key, which many non-map apps also carry. */
     static String detect(ApplicationInfo ai) {
+        String lib = detectLib(ai);
+        if (lib != null) return lib;
         Bundle md = ai.metaData;
         if (md != null && (md.containsKey("com.google.android.geo.API_KEY") || md.containsKey("com.google.android.maps.v2.API_KEY")))
-            return "Google Maps SDK";
+            return "Google Maps key, may not show a map";
+        return null;
+    }
+
+    static String detectLib(ApplicationInfo ai) {
         List<String> apks = new ArrayList<String>();
         if (ai.sourceDir != null) apks.add(ai.sourceDir);
         if (ai.splitSourceDirs != null) Collections.addAll(apks, ai.splitSourceDirs);

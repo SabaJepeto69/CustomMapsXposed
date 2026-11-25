@@ -37,12 +37,23 @@ public class Hook implements IXposedHookLoadPackage {
         if (PKG.equals(lp.packageName) || !lp.isFirstApplication) return;
         XSharedPreferences sp = new XSharedPreferences(PKG, "prefs");
         sp.reload();
-        if (!sp.getBoolean("enabled", true)) return;
+        File pf = null;
+        try { pf = sp.getFile(); } catch (Throwable ignored) {}
+        if (pf == null || !pf.canRead()) {
+            log(lp.packageName + ": can't read MapSkin settings (" + pf + "). Open MapSkin once and tap Apply.");
+            return;
+        }
+        if (!sp.getBoolean("enabled", true)) {
+            log(lp.packageName + ": re-skinning is switched off in MapSkin, doing nothing");
+            return;
+        }
         theme = sp.getString("theme", "neon");
         mbJson = sp.getString("mbjson", null);
         iconId = sp.getString("icon", "off");
         iconB64 = sp.getString("icon_b64", null);
         cl = lp.classLoader;
+        log("loaded into " + lp.packageName + ": theme=" + theme + " icon=" + iconId
+                + " mapboxStyle=" + (mbJson == null ? "missing (tap Apply with internet on)" : mbJson.length() + " chars"));
         try { gJson = Themes.google(theme); } catch (Throwable t) { log(t); }
 
         safe(new Runnable() { public void run() { hookGoogle(); } });
@@ -130,27 +141,38 @@ public class Hook implements IXposedHookLoadPackage {
             @Override protected void beforeHookedMethod(MethodHookParam p) {
                 if (p.args.length == 0 || !(p.args[0] instanceof String)) return;
                 String n = p.method.getName();
+                String was = (String) p.args[0];
                 if (n.toLowerCase().contains("uri") || n.toLowerCase().contains("url")) {
                     String u = styleFile();
-                    if (u != null) p.args[0] = u;
+                    if (u == null || u.equals(was)) return;
+                    p.args[0] = u;
                 } else {
+                    if (mbJson.equals(was)) return;
                     p.args[0] = mbJson;
                 }
+                log("Mapbox " + n + ": replaced style " + (was.length() > 80 ? was.substring(0, 80) + "…" : was));
             }
         };
-        boolean found = false;
-        Class<?> mm = find("com.mapbox.maps.MapboxMap");
-        if (mm != null) {
-            found = true;
-            for (String n : new String[]{"loadStyleUri", "loadStyleJson", "loadStyle"}) XposedBridge.hookAllMethods(mm, n, h);
+        // v10 loads styles via MapboxMap/NativeMapImpl; v11 routes everything through
+        // MapboxStyleManager -> StyleManager (the JNI peer), so hook every layer.
+        String[][] targets = {
+            {"com.mapbox.maps.MapboxMap", "loadStyleUri", "loadStyleJson", "loadStyle"},
+            {"com.mapbox.maps.NativeMapImpl", "setStyleURI", "setStyleJSON"},
+            {"com.mapbox.maps.MapboxStyleManager", "setStyleURI", "setStyleJSON"},
+            {"com.mapbox.maps.StyleManager", "setStyleURI", "setStyleJSON"},
+        };
+        StringBuilder got = new StringBuilder();
+        for (String[] t : targets) {
+            Class<?> c = find(t[0]);
+            if (c == null) continue;
+            for (int i = 1; i < t.length; i++) {
+                int n = 0;
+                try { java.util.Set<?> s = XposedBridge.hookAllMethods(c, t[i], h); n = s == null ? 0 : s.size(); }
+                catch (Throwable e) { log(e); }
+                if (n > 0) got.append(' ').append(c.getSimpleName()).append('.').append(t[i]).append('×').append(n);
+            }
         }
-        Class<?> nm = find("com.mapbox.maps.NativeMapImpl");
-        if (nm != null) {
-            found = true;
-            XposedBridge.hookAllMethods(nm, "setStyleURI", h);
-            XposedBridge.hookAllMethods(nm, "setStyleJSON", h);
-        }
-        if (found) log("Mapbox SDK found");
+        if (got.length() > 0) log("Mapbox SDK found, hooked:" + got);
     }
 
     /** Replaces the default 2D location puck image with the chosen icon. */
@@ -169,6 +191,7 @@ public class Hook implements IXposedHookLoadPackage {
                     setField(p.thisObject, "topImage", ih);
                     setField(p.thisObject, "bearingImage", null);
                     setField(p.thisObject, "shadowImage", null);
+                    log("Mapbox location puck replaced");
                 } catch (Throwable t) { log(t); }
             }
         });
@@ -238,8 +261,14 @@ public class Hook implements IXposedHookLoadPackage {
 
     static void safe(Runnable r) { try { r.run(); } catch (Throwable t) { log(t); } }
 
-    static void log(String s) { XposedBridge.log(TAG + s); }
-    static void log(Throwable t) { XposedBridge.log(TAG + t); }
+    static void log(String s) {
+        android.util.Log.i("MapSkin", s);
+        try { XposedBridge.log(TAG + s); } catch (Throwable ignored) {}
+    }
+    static void log(Throwable t) {
+        android.util.Log.e("MapSkin", "error", t);
+        try { XposedBridge.log(TAG + android.util.Log.getStackTraceString(t)); } catch (Throwable ignored) {}
+    }
 
     static boolean fits(Class<?>[] types, Object[] args) {
         if (types.length != args.length) return false;
