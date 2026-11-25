@@ -36,7 +36,14 @@ public final class BuildingTiles extends Binder {
     static final int MAX_ZOOM = 21;          // Google's own 3D buildings are switched off, so draw all the way in
     static final int DATA_ZOOM = 14;         // highest zoom the vector tiles exist at
     static final int SIZE = 512;             // tile bitmap size (crisp on high-dpi screens)
-    static final float LEAN = 0.55f;         // how far roofs are lifted per metre of height, relative to ground scale
+    // Game-map look (like apps on Mapbox's 3D engine): every building gets at least MIN_HEIGHT, and heights are
+    // exaggerated more the further out you zoom, so blocks still read as 3D in suburbs and at city scale.
+    static final float MIN_HEIGHT = 10f;     // metres; OSM's default for untagged buildings (~3-6 m) looks flat
+    static final float EXAGGERATION = 1.8f;  // at zoom 16+; doubles every two zoom levels further out
+
+    static float exaggeration(int z) {
+        return z >= 16 ? EXAGGERATION : (float) (EXAGGERATION * Math.pow(2, (16 - z) * 0.5));
+    }
 
     final Context ctx;
     final int roof, wallLight, wallDark, edge;
@@ -49,8 +56,8 @@ public final class BuildingTiles extends Binder {
         this.ctx = ctx;
         this.roof = roof;
         this.edge = edge;
-        this.wallLight = shade(roof, 0.62f);
-        this.wallDark = shade(roof, 0.38f);
+        this.wallLight = shade(roof, 0.78f);   // walls must stand out from the dark ground for the 3D to read
+        this.wallDark = shade(roof, 0.55f);
     }
 
     static int shade(int c, float f) {
@@ -122,7 +129,7 @@ public final class BuildingTiles extends Binder {
         // ground metres per tile pixel, at this tile's latitude
         double lat = Math.atan(Math.sinh(Math.PI * (1 - 2.0 * (y + 0.5) / n)));
         double mpp = 40075016.686 * Math.cos(lat) / n / SIZE;
-        float pxPerMetre = (float) (LEAN / mpp);
+        float pxPerMetre = (float) (exaggeration(z) / mpp);
 
         Collections.sort(list, new Comparator<Building>() {   // back to front: northern (top) buildings first
             public int compare(Building a, Building b) { return Float.compare(a.maxY, b.maxY); }
@@ -139,7 +146,7 @@ public final class BuildingTiles extends Binder {
         boolean drew = false;
 
         for (Building b : list) {
-            float lift = Math.min(Math.max(b.height, 4f) * pxPerMetre, SIZE * 0.4f);
+            float lift = Math.min(Math.max(b.height, MIN_HEIGHT) * pxPerMetre, SIZE * 0.45f);
             float base = Math.min(b.minHeight * pxPerMetre, lift);
             if (b.maxY - lift > SIZE || b.maxY < 0) continue;    // nothing of it lands on this tile
             float[] outer = b.rings.get(0);
