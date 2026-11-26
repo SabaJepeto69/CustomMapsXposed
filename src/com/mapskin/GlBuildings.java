@@ -355,12 +355,8 @@ final class GlBuildings extends TextureView implements TextureView.SurfaceTextur
         "uniform mat4 uMvp; attribute vec4 aPos; varying float vShade;" +
         "void main() { vShade = aPos.w; gl_Position = uMvp * vec4(aPos.xyz, 1.0); }";
     static final String FS =
-        "precision mediump float; uniform vec3 uColor; uniform vec3 uHole; uniform float uAlpha; varying float vShade;" +
-        "void main() {" +
-        "  float d = distance(gl_FragCoord.xy, uHole.xy);" +
-        "  float a = uAlpha * mix(0.3, 1.0, smoothstep(uHole.z * 0.55, uHole.z, d));" +   // see the player arrow through buildings
-        "  gl_FragColor = vec4(uColor * vShade * a, a);" +
-        "}";
+        "precision mediump float; uniform vec3 uColor; uniform float uAlpha; varying float vShade;" +
+        "void main() { gl_FragColor = vec4(uColor * vShade * uAlpha, uAlpha); }";
 
     final class Render extends Thread {
         final SurfaceTexture st;
@@ -371,7 +367,7 @@ final class GlBuildings extends TextureView implements TextureView.SurfaceTextur
         EGLDisplay dpy;
         EGLContext ctx;
         EGLSurface surf;
-        int prog, uMvp, uColor, uHole, uAlpha, aPos;
+        int prog, uMvp, uColor, uAlpha, aPos;
 
         Render(SurfaceTexture st) { super("MapSkin-3D"); this.st = st; }
 
@@ -441,7 +437,6 @@ final class GlBuildings extends TextureView implements TextureView.SurfaceTextur
             if (ok[0] == 0) throw new IllegalStateException("link: " + GLES20.glGetProgramInfoLog(prog));
             uMvp = GLES20.glGetUniformLocation(prog, "uMvp");
             uColor = GLES20.glGetUniformLocation(prog, "uColor");
-            uHole = GLES20.glGetUniformLocation(prog, "uHole");
             uAlpha = GLES20.glGetUniformLocation(prog, "uAlpha");
             aPos = GLES20.glGetAttribLocation(prog, "aPos");
             Hook.log("3D buildings: OpenGL layer ready (" + GLES20.glGetString(GLES20.GL_RENDERER) + ")");
@@ -491,7 +486,6 @@ final class GlBuildings extends TextureView implements TextureView.SurfaceTextur
                 GLES20.glEnable(GLES20.GL_BLEND);
                 GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
                 GLES20.glUniform1f(uAlpha, alpha);
-                GLES20.glUniform3f(uHole, (float) g.cx, (float) (h - g.cy), 46 * density);   // GL y is bottom-up
                 GLES20.glLineWidth(Math.max(1f, 1.5f * density));
                 GLES20.glEnableVertexAttribArray(aPos);
                 synchronized (this) {
