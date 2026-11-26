@@ -248,6 +248,81 @@ public class Hook implements IXposedHookLoadPackage {
         finally { d.recycle(); r.recycle(); }
     }
 
+    // ---- Real 3D buildings: an OpenGL layer laid over the map's own surface (falls back to map tiles) ----
+    static volatile java.lang.ref.WeakReference<android.app.Activity> resumed;
+    static boolean activitiesTracked;
+
+    static synchronized void trackActivities() {
+        if (activitiesTracked) return;
+        activitiesTracked = true;
+        XposedBridge.hookAllMethods(android.app.Activity.class, "onResume", new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam p) {
+                resumed = new java.lang.ref.WeakReference<android.app.Activity>((android.app.Activity) p.thisObject);
+            }
+        });
+    }
+
+    static android.app.Activity topActivity() {
+        java.lang.ref.WeakReference<android.app.Activity> w = resumed;
+        android.app.Activity a = w == null ? null : w.get();
+        if (a != null && !a.isFinishing()) return a;
+        try {                                                     // already resumed before MapSkin hooked onResume
+            Object at = callStatic(Class.forName("android.app.ActivityThread"), "currentActivityThread");
+            java.lang.reflect.Field f = at.getClass().getDeclaredField("mActivities");
+            f.setAccessible(true);
+            for (Object rec : ((Map<?, ?>) f.get(at)).values()) {
+                java.lang.reflect.Field pf = rec.getClass().getDeclaredField("paused");
+                pf.setAccessible(true);
+                if (pf.getBoolean(rec)) continue;
+                java.lang.reflect.Field af = rec.getClass().getDeclaredField("activity");
+                af.setAccessible(true);
+                return (android.app.Activity) af.get(rec);
+            }
+        } catch (Throwable t) { log(t); }
+        return null;
+    }
+
+    /** The map's drawing surface: the biggest visible SurfaceView/TextureView on screen. */
+    static android.view.View findMapSurface(android.view.View v, android.view.View best) {
+        if (v instanceof GlBuildings || !v.isShown()) return best;
+        if (v instanceof android.view.SurfaceView || v instanceof android.view.TextureView) {
+            if (best == null || (long) v.getWidth() * v.getHeight() > (long) best.getWidth() * best.getHeight()) best = v;
+        }
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) best = findMapSurface(g.getChildAt(i), best);
+        }
+        return best;
+    }
+
+    static void startGl(final android.os.Binder engine, final int attempt) {
+        final android.os.Handler main = new android.os.Handler(Looper.getMainLooper());
+        try {
+            android.app.Activity a = topActivity();
+            android.view.View surf = a == null ? null : findMapSurface(a.getWindow().getDecorView(), null);
+            if (surf != null && surf.getWidth() > 0 && surf.getParent() instanceof android.widget.FrameLayout) {
+                android.widget.FrameLayout parent = (android.widget.FrameLayout) surf.getParent();
+                for (int i = 0; i < parent.getChildCount(); i++) if (parent.getChildAt(i) instanceof GlBuildings) return;
+                String[] c = Themes.palette(theme);
+                String edge = Themes.BUILDING_EDGE[Themes.index(theme)];
+                int roof = android.graphics.Color.parseColor(c[8]), edgeC = android.graphics.Color.parseColor(edge != null ? edge : c[5]);
+                Context ctx = app();
+                BuildingTiles data = new BuildingTiles(ctx != null ? ctx : a, roof, edgeC);
+                GlBuildings gl = new GlBuildings(a, engine, data, roof, edgeC, new Runnable() {
+                    public void run() { addBuildingOverlay(engine); }
+                });
+                parent.addView(gl, parent.indexOfChild(surf) + 1, new android.widget.FrameLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+                log("3D buildings: OpenGL layer attached over " + surf.getClass().getName() + " (" + surf.getWidth() + "x"
+                        + surf.getHeight() + ") in " + parent.getClass().getName());
+                return;
+            }
+            if (attempt == 0) log("3D buildings: waiting for the map view (surface=" + surf + ")");
+        } catch (Throwable t) { log(t); }
+        if (attempt < 12) main.postDelayed(new Runnable() { public void run() { startGl(engine, attempt + 1); } }, 1000);
+        else { log("3D buildings: map view not found, using map tiles instead"); addBuildingOverlay(engine); }
+    }
+
     // ---- 3D buildings switch: map transaction 41 = setBuildingsEnabled(boolean) ----
     static final int TX_SET_BUILDINGS = 41;
     static final ThreadLocal<Boolean> injectingBuildings = new ThreadLocal<Boolean>();
@@ -359,7 +434,8 @@ public class Hook implements IXposedHookLoadPackage {
                 main.post(new Runnable() { public void run() { onGoogleEngine(engine); } });
                 if (tilt3d) {
                     main.post(new Runnable() { public void run() { disableGoogleBuildings(engine); } });
-                    main.post(new Runnable() { public void run() { addBuildingOverlay(engine); } });
+                    trackActivities();
+                    main.postDelayed(new Runnable() { public void run() { startGl(engine, 0); } }, 800);
                     // Tilt only while the map settles on its first position, then leave the camera to the user.
                     for (long delay : new long[]{2000, 5000})
                         main.postDelayed(new Runnable() { public void run() { tiltGoogle(engine); } }, delay);
