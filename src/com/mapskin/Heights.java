@@ -37,6 +37,7 @@ final class Heights {
             }
             int pts = r.length / 2;
             area[i] = (float) (Math.abs(a) / 2 * m2PerPx2);
+            b.area = area[i];
             int gx = clamp((int) ((cx / pts + offX) / tilePx * GRID)), gy = clamp((int) ((cy / pts + offY) / tilePx * GRID));
             cell[i] = gy * GRID + gx;
             cover[cell[i]] += area[i];

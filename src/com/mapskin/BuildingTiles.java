@@ -46,10 +46,13 @@ public final class BuildingTiles extends Binder {
     }
 
     final Context ctx;
+    volatile int logged;
     final int roof, edge;
     String tileUrl;                           // e.g. https://tiles.openfreemap.org/planet/<version>/{z}/{x}/{y}.pbf
-    final Map<String, byte[]> mem = Collections.synchronizedMap(new LinkedHashMap<String, byte[]>(64, 0.75f, true) {
-        protected boolean removeEldestEntry(Map.Entry<String, byte[]> e) { return size() > 40; }
+    /** Decoded z14 tiles, coordinates 0..1 across the tile, heights already filled in. Decoded once, reused by every
+     *  map tile and zoom that shows them (raw tiles stay on disk: central Tel Aviv alone is ~900 KB). */
+    final Map<String, List<Building>> decoded = Collections.synchronizedMap(new LinkedHashMap<String, List<Building>>(32, 0.75f, true) {
+        protected boolean removeEldestEntry(Map.Entry<String, List<Building>> e) { return size() > 24; }
     });
 
     BuildingTiles(Context ctx, int roof, int edge) {
@@ -72,7 +75,12 @@ public final class BuildingTiles extends Binder {
         data.enforceInterface(DESC);
         int x = data.readInt(), y = data.readInt(), z = data.readInt();
         byte[] png = null;
-        try { png = render(x, y, z); } catch (Throwable t) { Hook.log(t); }
+        long t0 = android.os.SystemClock.uptimeMillis();
+        try { png = render(x, y, z); } catch (Throwable t) { Hook.log("3D buildings: tile " + z + "/" + x + "/" + y + " failed"); Hook.log(t); }
+        if (logged < 5 && png != null) {
+            logged++;
+            Hook.log("3D buildings: drew " + z + "/" + x + "/" + y + " in " + (android.os.SystemClock.uptimeMillis() - t0) + " ms");
+        }
         reply.writeNoException();
         reply.writeInt(1);                                  // non-null Tile follows
         writeTile(reply, png);
@@ -120,6 +128,22 @@ public final class BuildingTiles extends Binder {
         float minX, minY, maxX, maxY;                            // outer ring bounds
         int orient = 1;                                          // +1 if the outer ring has positive area (MVT exterior)
         float depth;                                             // sort key for the current view
+        float area;                                              // footprint, square metres
+
+        /** Copy mapped to pixels: p * scale - off. */
+        Building scaled(float scale, float offX, float offY) {
+            Building c = new Building();
+            for (float[] r : rings) {
+                float[] q = new float[r.length];
+                for (int i = 0; i < r.length; i += 2) { q[i] = r[i] * scale - offX; q[i + 1] = r[i + 1] * scale - offY; }
+                c.rings.add(q);
+            }
+            c.height = height; c.minHeight = minHeight; c.known = known; c.cls = cls; c.idHash = idHash;
+            c.orient = orient; c.area = area;
+            c.minX = minX * scale - offX; c.maxX = maxX * scale - offX;
+            c.minY = minY * scale - offY; c.maxY = maxY * scale - offY;
+            return c;
+        }
     }
 
     // ---------------- camera: buildings lean "up the screen", so they follow the map's rotation and tilt ----------------
@@ -173,6 +197,8 @@ public final class BuildingTiles extends Binder {
         line.setStrokeWidth(z >= 15 ? 2f : 1.2f);
         line.setColor(edge);
         boolean drew = false;
+        Path w = new Path(), r = new Path();
+        r.setFillType(Path.FillType.EVEN_ODD);
 
         for (Building b : list) {
             float lift = Math.min(Math.max(b.height, MIN_HEIGHT) * pxPerMetre, SIZE * 0.45f);
@@ -192,13 +218,12 @@ public final class BuildingTiles extends Binder {
                 if (-(nx * ux + ny * uy) <= 0) continue;                       // faces away from the camera
                 float len = (float) Math.sqrt(nx * nx + ny * ny);
                 float side = len > 0 ? (nx * rx + ny * ry) / len : 0;          // -1 left-facing .. +1 right-facing
-                Path w = new Path();
+                w.rewind();
                 w.moveTo(x1 + bx, y1 + by); w.lineTo(x2 + bx, y2 + by); w.lineTo(x2 + lx, y2 + ly); w.lineTo(x1 + lx, y1 + ly); w.close();
                 fill.setColor(shade(roof, 0.675f - 0.125f * side));            // lit from the left
                 c.drawPath(w, fill);
             }
-            Path r = new Path();
-            r.setFillType(Path.FillType.EVEN_ODD);
+            r.rewind();
             for (float[] ring : b.rings) {
                 r.moveTo(ring[0] + lx, ring[1] + ly);
                 for (int i = 2; i < ring.length; i += 2) r.lineTo(ring[i] + lx, ring[i + 1] + ly);
@@ -235,15 +260,35 @@ public final class BuildingTiles extends Binder {
         decodeSource(out, DATA_ZOOM, sx, sy, SIZE * sub, ox * SIZE - dx, oy * SIZE - dy);
     }
 
-    /** Decodes one data tile drawn tilePx wide, minus (offX, offY), and fills in missing heights. */
+    /**
+     * Adds the buildings of data tile (sx, sy, dz) drawn tilePx wide minus (offX, offY), but only those that can reach
+     * the map tile being drawn (roofs lean up to 0.45 tile) and are big enough to see at this zoom.
+     */
     void decodeSource(List<Building> out, int dz, int sx, int sy, float tilePx, float offX, float offY) throws Exception {
+        List<Building> all = data(dz, sx, sy);
+        if (all == null) return;
+        float lo = -SIZE * 0.5f, hi = SIZE * 1.5f;
+        float minArea = tilePx <= SIZE / 2f ? 50 : tilePx <= SIZE ? 20 : 0;   // m²; specks of a few pixels at z13/z14
+        for (Building b : all) {
+            if (b.area < minArea) continue;
+            if (b.maxX * tilePx - offX < lo || b.minX * tilePx - offX > hi || b.maxY * tilePx - offY < lo || b.minY * tilePx - offY > hi) continue;
+            out.add(b.scaled(tilePx, offX, offY));
+        }
+    }
+
+    List<Building> data(int dz, int sx, int sy) throws Exception {
+        String key = dz + "/" + sx + "/" + sy;
+        List<Building> l = decoded.get(key);
+        if (l != null) return l;
         byte[] pbf = fetch(dz, sx, sy);
-        if (pbf == null) return;
-        int start = out.size();
-        Mvt.decodeBuildings(pbf, out, tilePx, offX, offY);
+        if (pbf == null) return null;
+        l = new ArrayList<Building>();
+        Mvt.decodeBuildings(pbf, l, 1f, 0f, 0f);
         double lat = Math.atan(Math.sinh(Math.PI * (1 - 2.0 * (sy + 0.5) / (1 << dz))));
         double tileMetres = 40075016.686 * Math.cos(lat) / (1 << dz);
-        Heights.estimate(out.subList(start, out.size()), tilePx, offX, offY, tileMetres);
+        Heights.estimate(l, 1f, 0f, 0f, tileMetres);
+        decoded.put(key, l);
+        return l;
     }
 
     // ---------------- network + cache ----------------
@@ -254,8 +299,7 @@ public final class BuildingTiles extends Binder {
      */
     byte[] fetch(int z, int x, int y) throws Exception {
         String key = z + "/" + x + "/" + y;
-        byte[] b = mem.get(key);
-        if (b != null) return b.length == 0 ? null : b;
+        byte[] b;
         File dir = new File(ctx.getCacheDir(), "mapskin_buildings");
         File f = new File(dir, "ov_" + z + "_" + x + "_" + y + ".pbf");
         if (f.isFile() && System.currentTimeMillis() - f.lastModified() < 30L * 24 * 3600 * 1000) {
@@ -277,7 +321,6 @@ public final class BuildingTiles extends Binder {
             o.close();
         }
         if (b.length > 2 && (b[0] & 255) == 0x1f && (b[1] & 255) == 0x8b) b = readAll(new GZIPInputStream(new java.io.ByteArrayInputStream(b)));
-        mem.put(key, b);
         return b.length == 0 ? null : b;
     }
 
