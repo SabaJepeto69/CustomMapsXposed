@@ -9,7 +9,7 @@ javac -J-Xmx384m -nowarn -source 8 -target 8 -bootclasspath "$SDK" -d build/stub
 javac -J-Xmx384m -nowarn -source 8 -target 8 -bootclasspath "$SDK" -cp build/stubs -d build/classes $(find src -name '*.java')
 dalvik-exchange -JXmx384m --dex --min-sdk-version=26 --output=build/dex/classes.dex build/classes
 
-aapt package -f -M AndroidManifest.xml -A assets -I "$SDK" -F build/unsigned.apk
+aapt package -f -M AndroidManifest.xml -S res -A assets -I "$SDK" -F build/unsigned.apk
 (cd build/dex && aapt add ../unsigned.apk classes.dex >/dev/null)
 zipalign -f 4 build/unsigned.apk build/aligned.apk
 

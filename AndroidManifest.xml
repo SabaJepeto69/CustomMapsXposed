@@ -3,7 +3,7 @@
     package="com.mapskin" android:versionCode="1" android:versionName="1.0">
   <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="28"/>
   <uses-permission android:name="android.permission.INTERNET"/>
-  <application android:label="MapSkin" android:allowBackup="false">
+  <application android:label="MapSkin" android:allowBackup="false" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
     <meta-data android:name="xposedmodule" android:value="true"/>
     <meta-data android:name="xposeddescription" android:value="Re-skins maps and the player icon in apps that use Google Maps SDK, Mapbox or MapLibre"/>
     <meta-data android:name="xposedminversion" android:value="93"/>

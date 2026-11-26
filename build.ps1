@@ -28,7 +28,8 @@ Invoke-Tool javac -nowarn -encoding UTF-8 --release 8 -classpath "$jar;build\stu
 $classes = Get-ChildItem -Recurse build\classes -Filter *.class | ForEach-Object FullName
 Invoke-Tool "$tools\d8.bat" --min-api 26 --lib $jar --output build\dex @classes
 
-Invoke-Tool "$tools\aapt2.exe" link -o build\unsigned.apk --manifest AndroidManifest.xml -I $jar -A assets
+Invoke-Tool "$tools\aapt2.exe" compile --dir res -o build\res.zip
+Invoke-Tool "$tools\aapt2.exe" link -o build\unsigned.apk --manifest AndroidManifest.xml -I $jar -A assets build\res.zip
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open("$PWD\build\unsigned.apk", 'Update')
 try { [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, "$PWD\build\dex\classes.dex", 'classes.dex') | Out-Null }

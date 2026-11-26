@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MapSkin launcher foreground: a little dark street grid, a neon highway and a glowing chevron. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+  <path android:strokeColor="#3B1A20" android:strokeWidth="3" android:strokeLineCap="round"
+      android:pathData="M30,44 L78,44 M30,64 L78,64 M44,30 L44,78 M64,30 L64,78"/>
+  <path android:fillColor="#2A0B12" android:strokeColor="#FF3B4F" android:strokeWidth="1"
+      android:pathData="M47,47 h14 v14 h-14 z M67,47 h9 v14 h-9 z M47,67 h14 v9 h-14 z"/>
+  <path android:strokeColor="#FF3B5C" android:strokeWidth="5" android:strokeLineCap="round"
+      android:pathData="M30,76 Q52,62 78,32"/>
+  <path android:fillColor="#FCEE0A" android:strokeColor="#00E5FF" android:strokeWidth="2" android:strokeLineJoin="miter"
+      android:pathData="M54,33 L68,70 L54,61 L40,70 Z"/>
+  <path android:fillColor="#05070D" android:pathData="M54,45 L61,62 L54,57.5 L47,62 Z"/>
+</vector>
